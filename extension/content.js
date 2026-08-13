@@ -100,6 +100,38 @@
   });
 })();
 
+// ─── Debug log buffer ─────────────────────────────────────────────────────
+// injected.js runs in the MAIN world and has no `chrome.*`, so it relays its
+// log lines here. Batch them: a get/set round-trip per line would race with
+// itself and lose entries under bursty logging.
+const MAX_LOG_LINES = 1000;
+let pendingLogs = [];
+let logFlushTimer = null;
+
+function flushLogs() {
+  logFlushTimer = null;
+  if (pendingLogs.length === 0) return;
+  const batch = pendingLogs;
+  pendingLogs = [];
+  chrome.storage.local.get("extensionLogs", (data) => {
+    if (chrome.runtime.lastError) return;
+    let logs = (data?.extensionLogs || []).concat(batch);
+    if (logs.length > MAX_LOG_LINES) logs = logs.slice(-MAX_LOG_LINES);
+    chrome.storage.local.set({ extensionLogs: logs });
+  });
+}
+
+function queueLog(line) {
+  if (typeof line !== "string") return;
+  pendingLogs.push(line);
+  if (pendingLogs.length >= 50) {
+    clearTimeout(logFlushTimer);
+    flushLogs();
+  } else if (!logFlushTimer) {
+    logFlushTimer = setTimeout(flushLogs, 1000);
+  }
+}
+
 // Listen for messages from injected code
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
@@ -112,14 +144,29 @@ window.addEventListener("message", (event) => {
     });
   }
 
+  if (event.data?.type === "FIFA_TICKET_SCOUT_LOG") {
+    queueLog(event.data.line);
+  }
+
   if (event.data?.type === "FIFA_TICKET_SCOUT_SCAN_PROGRESS") {
     chrome.runtime.sendMessage({
       type: "SCAN_PROGRESS",
-      performanceId: event.data.performanceId,
+      // Ticketmaster sends `eventId`; FIFA sends `performanceId`.
+      performanceId: event.data.performanceId || event.data.eventId,
       completed: event.data.completed,
       total: event.data.total,
       status: event.data.status,
       eta: event.data.eta,
+    });
+  }
+
+  if (event.data?.type === "FIFA_TICKET_SCOUT_SCAN_ERROR") {
+    queueLog(`[${new Date().toISOString()}] [scan error] ${event.data.error}`);
+    chrome.runtime.sendMessage({
+      type: "SCAN_PROGRESS",
+      performanceId: event.data.performanceId || event.data.eventId,
+      status: "error",
+      error: event.data.error,
     });
   }
 });
@@ -133,6 +180,14 @@ chrome.runtime.onMessage.addListener((message) => {
       performanceId: message.performanceId,
       scanSpeed: message.scanSpeed,
       scanConfig: message.scanConfig || null,
+      force: message.force || false,
+    }, "*");
+  }
+  
+  if (message.type === "START_TICKETMASTER_SCAN") {
+    window.postMessage({
+      type: "FIFA_TICKET_SCOUT_SCAN_TICKETMASTER",
+      eventId: message.eventId,
       force: message.force || false,
     }, "*");
   }

@@ -11,6 +11,8 @@
   ],
   "host_permissions": [
     "*://*.tickets.fifa.com/*",
+    "*://*.ticketmaster.com/*",
+    "https://services.ticketmaster.com/*",
     "https://api.gumroad.com/*",
     "https://yaydpahqlqwesqdddgfi.supabase.co/*",
     "https://raw.githubusercontent.com/*"
@@ -27,6 +29,17 @@
     },
     {
       "matches": ["*://*.tickets.fifa.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["*://*.ticketmaster.com/*"],
+      "js": ["ticketmaster-adapter.js", "injected.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://*.ticketmaster.com/*"],
       "js": ["content.js"],
       "run_at": "document_start"
     }

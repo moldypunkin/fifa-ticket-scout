@@ -4,8 +4,23 @@
 (function () {
   if (window.__fifaTicketScoutLoaded) return;
   window.__fifaTicketScoutLoaded = true;
-  console.log("[FIFA Ticket Scout] Injected script loaded successfully");
-  const MATCH_PATTERNS = ["/seatmap/", "/performance/"];
+  
+  // Detect which ticketing site we're on
+  const isTicketmaster = window.location.hostname.includes('ticketmaster.com');
+  const isFifa = window.location.hostname.includes('tickets.fifa.com');
+  
+  if (isTicketmaster) {
+    console.log("[FIFA Ticket Scout] Running on Ticketmaster (will use adapter)");
+  } else if (isFifa) {
+    console.log("[FIFA Ticket Scout] Running on FIFA (using FIFA logic)");
+  } else {
+    console.log("[FIFA Ticket Scout] Unknown ticketing site - no action");
+    return;
+  }
+
+  // For Ticketmaster, only capture requests we explicitly make (during extension scan)
+  // NOT the page's own requests - that interferes with inventory display
+  const MATCH_PATTERNS = isTicketmaster ? [] : ["/seatmap/", "/performance/"];
 
   // Defense-in-depth: prevent duplicate scans at the page level.
   // injected.js lives as long as the page — survives SW restarts.
@@ -15,11 +30,53 @@
   const SCAN_COOLDOWN_MS = 60000;
 
   function shouldCapture(url) {
+    // For Ticketmaster, never auto-capture page requests
+    if (isTicketmaster) return false;
+    // For FIFA, use normal pattern matching
     return MATCH_PATTERNS.some((p) => url.includes(p));
   }
 
   // Capture headers from real requests so the scan can reuse them
   let capturedHeaders = null;
+
+  // Mirror our own console output to the extension's log buffer.
+  //
+  // This file runs in the MAIN world, where `chrome.*` does not exist — so we
+  // relay each line to content.js (isolated world) via postMessage and let it
+  // do the storage write.
+  //
+  // Two constraints shape this:
+  //   1. Only forward lines carrying one of our own prefixes. Patching
+  //      console.log catches the host page's logging too, and Ticketmaster is
+  //      chatty enough to blow out the buffer in seconds.
+  //   2. Guard re-entrancy. Our postMessage is observed by the listener below,
+  //      and anything that logs while handling a message would loop forever.
+  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[TM]"];
+  const originalLog = console.log;
+  let relayingLog = false;
+  console.log = function (...args) {
+    originalLog.apply(console, args);
+    if (relayingLog) return;
+
+    const msg = args.map((a) => {
+      if (typeof a === "object" && a !== null) {
+        try { return JSON.stringify(a); } catch { return String(a); }
+      }
+      return String(a);
+    }).join(" ");
+
+    if (!LOG_PREFIXES.some((p) => msg.startsWith(p))) return;
+
+    relayingLog = true;
+    try {
+      window.postMessage({
+        type: "FIFA_TICKET_SCOUT_LOG",
+        line: `[${new Date().toISOString()}] ${msg}`,
+      }, "*");
+    } finally {
+      relayingLog = false;
+    }
+  };
 
   // Patch fetch
   const originalFetch = window.fetch;
@@ -96,9 +153,111 @@
     return originalSend.apply(this, args);
   };
 
+  // Ticketmaster scans are triggered the same way FIFA scans are: popup →
+  // background → content.js → postMessage, handled in the listener below.
+  // (An earlier version watched chrome.storage.onChanged here, which can never
+  // fire — there is no chrome.storage in the MAIN world.)
+
+  let tmScanInProgress = false;
+
+  async function triggerTicketmasterScan(eventId, force) {
+    if (tmScanInProgress && !force) {
+      console.log("[FIFA Ticket Scout] TM scan already in progress — ignoring");
+      return;
+    }
+    tmScanInProgress = true;
+    console.log("[FIFA Ticket Scout] Triggering Ticketmaster scan for:", eventId);
+
+    // `performanceId` is the field name the rest of the pipeline (content.js →
+    // background.js → popup) already keys progress on. Send the event id under
+    // both names so the Ticketmaster path reuses that plumbing unchanged.
+    const progress = (extra) => window.postMessage({
+      type: "FIFA_TICKET_SCOUT_SCAN_PROGRESS",
+      eventId,
+      performanceId: eventId,
+      total: 1,
+      ...extra,
+    }, "*");
+
+    try {
+      // Wait for the adapter to load if needed
+      let attempts = 0;
+      while (!window.__ticketmasterAdapter && attempts < 50) {
+        await new Promise((r) => setTimeout(r, 100));
+        attempts++;
+      }
+
+      if (!window.__ticketmasterAdapter) {
+        console.log("[FIFA Ticket Scout] Adapter never loaded");
+        window.postMessage({
+          type: "FIFA_TICKET_SCOUT_SCAN_ERROR",
+          eventId,
+          performanceId: eventId,
+          error: "Ticketmaster adapter failed to load",
+        }, "*");
+        return;
+      }
+
+      console.log("[FIFA Ticket Scout] Adapter ready, starting scan");
+
+      const token = window.__ticketmasterAdapter.getToken();
+      const correlationId = window.__ticketmasterAdapter.generateCorrelationId();
+
+      progress({ completed: 0, status: "scanning", eta: 3 });
+
+      const facetsData = await window.__ticketmasterAdapter.fetchFacets(eventId, token, correlationId);
+
+      if (!facetsData) {
+        console.log("[FIFA Ticket Scout] Ticketmaster facets request returned no data");
+        window.postMessage({
+          type: "FIFA_TICKET_SCOUT_SCAN_ERROR",
+          eventId,
+          performanceId: eventId,
+          error: "No data returned from Ticketmaster",
+        }, "*");
+        return;
+      }
+
+      window.postMessage({
+        type: "FIFA_TICKET_SCOUT",
+        url: `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets`,
+        body: facetsData,
+        site: "ticketmaster",
+      }, "*");
+      console.log("[FIFA Ticket Scout] Ticketmaster scan complete, sent data to background");
+
+      progress({ completed: 1, status: "complete" });
+    } catch (error) {
+      console.log("[FIFA Ticket Scout] Ticketmaster scan error:", error.message);
+      window.postMessage({
+        type: "FIFA_TICKET_SCOUT_SCAN_ERROR",
+        eventId,
+        performanceId: eventId,
+        error: error.message,
+      }, "*");
+    } finally {
+      tmScanInProgress = false;
+    }
+  }
+
   // Listen for scan commands from the content script
   window.addEventListener("message", async (event) => {
     if (event.source !== window) return;
+
+    // Handle Ticketmaster scans
+    if (isTicketmaster && event.data?.type === "FIFA_TICKET_SCOUT_SCAN_TICKETMASTER") {
+      const { eventId, force } = event.data;
+      if (!eventId) {
+        console.log("[FIFA Ticket Scout] No eventId provided");
+        return;
+      }
+
+      console.log("[FIFA Ticket Scout] Starting Ticketmaster scan for event:", eventId);
+      triggerTicketmasterScan(eventId, force);
+      return;
+    }
+
+    // Handle FIFA scans (original logic)
     if (event.data?.type !== "FIFA_TICKET_SCOUT_SCAN") return;
 
     const { productId, performanceId, scanSpeed, scanConfig: cfg, force } = event.data;

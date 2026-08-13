@@ -2257,6 +2257,19 @@ body {
   box-shadow: var(--shadow);
 }
 
+.btn-secondary {
+  background: var(--gray-100);
+  color: var(--gray-700);
+  border: 1px solid var(--border-dark);
+}
+
+.btn-secondary:hover {
+  background: var(--blue);
+  color: #fff;
+  border-color: var(--blue);
+  box-shadow: var(--shadow);
+}
+
 .btn-danger {
   background: var(--white);
   color: var(--gray-500);
@@ -2533,6 +2546,10 @@ body {
 .site-lms {
   background: var(--green-dim);
   color: var(--green);
+}
+.site-ticketmaster {
+  background: rgba(2, 106, 224, 0.15);
+  color: #3b9dff;
 }
 
 /* LMS empty-state button */

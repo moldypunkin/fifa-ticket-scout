@@ -4,6 +4,7 @@
 function siteFromUrl(url) {
   try {
     const h = new URL(url).hostname;
+    if (h.includes("ticketmaster")) return "ticketmaster";
     if (h.includes("-resale-")) return "resale";
     if (h.includes("-shop-"))   return "lms";
   } catch {}
@@ -366,7 +367,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // default. Avoids the historical "restore the things I forgot to wipe"
     // footgun where each new top-level storage key had to be added to a
     // rescue whitelist.
-    chrome.storage.local.remove("games", () => sendResponse({ ok: true }));
+    chrome.storage.local.remove(["games", "extensionLogs"], () => sendResponse({ ok: true }));
     return true;
   }
   if (message.type === "ACTIVATE_LICENSE") {
@@ -412,6 +413,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     }
     sendScanToTab(message.productId, message.performanceId, tabId, true);
+  }
+  if (message.type === "START_TICKETMASTER_SCAN") {
+    const eventId = message.eventId;
+    if (!eventId) return;
+    const gameKey = `ticketmaster:${eventId}`;
+    // Clear existing seats so the scan gives a fresh snapshot, matching the
+    // FIFA START_SCAN path above.
+    getStorage().then((data) => {
+      const games = data.games || {};
+      if (games[gameKey]) {
+        games[gameKey].seats = {};
+        chrome.storage.local.set({ games }, () => notifyDataUpdated());
+      }
+    });
+    const msg = {
+      type: "START_TICKETMASTER_SCAN",
+      eventId,
+      force: !!message.force,
+    };
+    if (tabId) {
+      chrome.tabs.sendMessage(tabId, msg);
+    } else {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs[0]) chrome.tabs.sendMessage(tabs[0].id, msg);
+      });
+    }
   }
   if (message.type === "SCAN_PROGRESS") {
     // Forward progress to popup immediately (non-blocking)
@@ -505,7 +532,194 @@ async function processApiResponse(url, body, tabId) {
     }
   }
 
+  // Ticketmaster facets
+  if (site === "ticketmaster" && url.includes("/api/ismds/event/") && body.facets) {
+    const eventIdMatch = url.match(/\/event\/([A-F0-9]+)/i);
+    const eventId = eventIdMatch ? eventIdMatch[1] : null;
+    if (eventId) {
+      await enforceGameLimit(`${site}:${eventId}`);
+      await saveTicketmasterSeats(eventId, body, tabId, site);
+    }
+  }
+
   notifyDataUpdated();
+}
+
+// ─── Ticketmaster place decoding ──────────────────────────────────────────
+// The facets endpoint returns one entry per (section, offer, attribute) group,
+// with its seats packed into a `places` string under `compress=places`. Two
+// layers have to come off before we have individual seats:
+//
+//   1. Bracket expansion. "A[B,C]" is A+B and A+C, and groups nest
+//      arbitrarily: "GEYDCORUGA5D[C[NY,O[A,I]],EMA]" is 4 places.
+//   2. Base32 (RFC 4648, unpadded). Each expanded id decodes to the string
+//      "<section>:<row>:<seat>" — e.g. "GEYDAORTGE5DEMY" -> "100:31:23".
+//
+// Verified against this event's own response: every facet's expanded place
+// count matched its reported `count`.
+const B32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+function expandPlaces(str) {
+  if (typeof str !== "string" || str === "") return [];
+  let i = 0;
+
+  function parseSeq(nested) {
+    let results = [""];
+    let lit = "";
+    const flush = () => {
+      if (lit) { results = results.map((r) => r + lit); lit = ""; }
+    };
+    while (i < str.length) {
+      const c = str[i];
+      if (nested && (c === "]" || c === ",")) break;
+      if (c === "[") {
+        flush();
+        i++; // consume "["
+        const alts = [];
+        for (;;) {
+          alts.push(...parseSeq(true));
+          if (str[i] === ",") { i++; continue; }
+          if (str[i] === "]") { i++; }
+          break;
+        }
+        const combined = [];
+        for (const r of results) for (const a of alts) combined.push(r + a);
+        results = combined;
+        continue;
+      }
+      lit += c;
+      i++;
+    }
+    flush();
+    return results;
+  }
+
+  return parseSeq(false);
+}
+
+function decodeBase32(s) {
+  let bits = "";
+  for (const c of s) {
+    const idx = B32_ALPHABET.indexOf(c);
+    if (idx < 0) return null;
+    bits += idx.toString(2).padStart(5, "0");
+  }
+  let out = "";
+  for (let i = 0; i + 8 <= bits.length; i += 8) {
+    out += String.fromCharCode(parseInt(bits.slice(i, i + 8), 2));
+  }
+  return out;
+}
+
+// "GEYDAORTGE5DEMY" -> { section: "100", row: "31", seat: "23" }
+function decodePlaceId(placeId) {
+  const decoded = decodeBase32(placeId);
+  if (!decoded) return null;
+  const parts = decoded.split(":");
+  if (parts.length < 3) return null;
+  return { section: parts[0], row: parts[1], seat: parts[2] };
+}
+
+// Prices live in _embedded.offer, keyed by the ids in each facet's `offers`.
+// Field naming there is not pinned down, so probe the plausible spellings and
+// fall back to the first numeric value that looks like a price.
+function buildOfferPriceMap(facetsData) {
+  const map = {};
+  const offers = facetsData?._embedded?.offer;
+  if (!Array.isArray(offers)) return map;
+
+  const pick = (o) => {
+    const candidates = [
+      o?.totalPrice, o?.total, o?.faceValue,
+      o?.listPrice, o?.price, o?.amount,
+      o?.prices?.total, o?.prices?.listPrice,
+    ];
+    for (const c of candidates) {
+      const n = typeof c === "object" && c !== null ? c.value ?? c.amount : c;
+      if (typeof n === "number" && isFinite(n) && n > 0) return n;
+    }
+    return null;
+  };
+
+  for (const o of offers) {
+    const id = o?.offerId || o?.id;
+    if (!id) continue;
+    const p = pick(o);
+    if (p != null) map[id] = p;
+  }
+  return map;
+}
+
+// Save Ticketmaster seat data from facets
+async function saveTicketmasterSeats(eventId, facetsData, tabId, site) {
+  if (!facetsData || !Array.isArray(facetsData.facets)) return;
+
+  const gameKey = `${site}:${eventId}`;
+  const data = await getStorage();
+  const games = data.games || {};
+
+  if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  // descriptionId -> human text ("Lower level of stadium")
+  const descriptions = {};
+  for (const d of facetsData?._embedded?.description || []) {
+    if (d?.descriptionId) {
+      descriptions[d.descriptionId] = (d.descriptions || []).join(", ");
+    }
+  }
+  const offerPrices = buildOfferPriceMap(facetsData);
+
+  // Expand every facet into individual seats matching the shape the dashboard
+  // already consumes: { block, row, seat, area, category, price, exclusive }.
+  // block/row/seat must be strings — the cluster sort calls localeCompare.
+  const seats = {};
+  let missingPrice = 0;
+  try {
+    for (const facet of facetsData.facets) {
+      if (facet.available === false) continue;
+
+      const area = descriptions[facet.description] || "";
+      const category = (facet.inventoryTypes || [])[0] || "standard";
+      const dollars = offerPrices[(facet.offers || [])[0]] ?? null;
+      // Stored in thousandths to match centsToUSD() in the popup.
+      const price = dollars != null ? Math.round(dollars * 1000) : null;
+      if (price == null) missingPrice++;
+
+      for (const compressed of facet.places || []) {
+        for (const placeId of expandPlaces(compressed)) {
+          const parsed = decodePlaceId(placeId);
+          if (!parsed) continue;
+          seats[placeId] = {
+            block: String(parsed.section || facet.section || ""),
+            row: String(parsed.row || ""),
+            seat: String(parsed.seat || ""),
+            area,
+            category,
+            price,
+            exclusive: true,
+            site: "ticketmaster",
+            accessible: (facet.accessibility || []).length > 0,
+            attributes: facet.attributes || [],
+          };
+        }
+      }
+    }
+  } catch (error) {
+    console.log("[background] Error parsing Ticketmaster facets:", error.message);
+  }
+
+  const total = Object.keys(seats).length;
+  console.log(`[background] Ticketmaster: ${total} seats parsed` +
+    (missingPrice ? `, ${missingPrice} facets had no resolvable price` : ""));
+
+  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].site = site;
+  games[gameKey].lastScanned = Date.now();
+
+  // tabGameMap is the module-level in-memory map every other save path uses;
+  // it is deliberately not persisted to storage.
+  if (tabId) tabGameMap[tabId] = gameKey;
+  await chrome.storage.local.set({ games });
 }
 
 function extractParam(url, param) {

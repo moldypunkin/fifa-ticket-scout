@@ -71,14 +71,22 @@ document.addEventListener("DOMContentLoaded", () => {
     chevron.classList.toggle("open", !isOpen);
   });
 
+  const onClick = (id, handler) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("click", handler);
+  };
+
   // Scan all sections
-  document.getElementById("scanBtn").addEventListener("click", startScan);
+  onClick("scanBtn", startScan);
 
   // Export CSV
-  document.getElementById("exportBtn").addEventListener("click", exportCSV);
+  onClick("exportBtn", exportCSV);
+
+  // Download logs
+  onClick("logsBtn", downloadLogs);
 
   // Clear data
-  document.getElementById("clearBtn").addEventListener("click", () => {
+  onClick("clearBtn", () => {
     if (confirm("Clear all captured data?")) {
       chrome.runtime.sendMessage({ type: "CLEAR_DATA" }, () => {
         loadData();
@@ -87,6 +95,30 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
 });
+
+function downloadLogs() {
+  chrome.storage.local.get("extensionLogs", (data) => {
+    const logs = data.extensionLogs || [];
+    if (logs.length === 0) {
+      alert("No logs captured yet. Run a scan first.");
+      return;
+    }
+    
+    const logText = logs.join("\n");
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
+    const filename = `fifa-scout-logs-${timestamp}.txt`;
+    
+    const blob = new Blob([logText], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+}
 
 async function getCurrentTabUrl() {
   try {
@@ -98,6 +130,7 @@ async function getCurrentTabUrl() {
 function siteFromUrl(url) {
   try {
     const h = new URL(url).hostname;
+    if (h.includes("ticketmaster")) return "ticketmaster";
     if (h.includes("-shop-")) return "lms";
     if (h.includes("-resale-")) return "resale";
   } catch {}
@@ -107,11 +140,15 @@ function siteFromUrl(url) {
 function loadData() {
   getCurrentTabUrl().then((url) => {
     const isFifaSite = /\.tickets\.fifa\.com/.test(url);
+    const isTicketmasterSite = /ticketmaster\.com/.test(url);
     const isSeatMap = isFifaSite && (/perfId=/.test(url) || /\/seat\//.test(url) || /\/performance\/\d+/.test(url));
+    const tmEventMatch = isTicketmasterSite && url.match(/\/event\/([A-F0-9]+)/i);
+    const tmEventId = tmEventMatch ? tmEventMatch[1] : null;
+    const isTicketmasterEvent = !!tmEventId;
 
     chrome.storage.local.get(null, (data) => {
       if (chrome.runtime.lastError || !data?.games) {
-        showEmpty(isFifaSite, isSeatMap);
+        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent);
         return;
       }
 
@@ -119,7 +156,7 @@ function loadData() {
       const gameKeys = Object.keys(games);
 
       if (gameKeys.length === 0) {
-        showEmpty(isFifaSite, isSeatMap);
+        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent);
         return;
       }
 
@@ -130,7 +167,12 @@ function loadData() {
 
       // Try compound key matching: preferred site first, then other site, then first cached
       let activeKey = null;
-      if (tabPerfId) {
+      if (tmEventId) {
+        // Ticketmaster keys are exact — never fall back to a cached FIFA game
+        // while the user is looking at a Ticketmaster event.
+        const tmKey = `ticketmaster:${tmEventId}`;
+        if (games[tmKey]) activeKey = tmKey;
+      } else if (tabPerfId) {
         const preferred = `${tabSite}:${tabPerfId}`;
         const other = `${tabSite === "lms" ? "resale" : "lms"}:${tabPerfId}`;
         if (games[preferred]) activeKey = preferred;
@@ -140,12 +182,12 @@ function loadData() {
       if (!activeKey && tabPerfId && games[tabPerfId]) {
         activeKey = tabPerfId;
       }
-      if (!activeKey) activeKey = gameKeys[0];
+      if (!activeKey && !isTicketmasterEvent) activeKey = gameKeys[0];
 
-      const game = games[activeKey];
+      const game = activeKey ? games[activeKey] : null;
 
       if (!game || Object.keys(game.seats || {}).length === 0) {
-        showEmpty(isFifaSite, isSeatMap);
+        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent);
         return;
       }
 
@@ -162,7 +204,7 @@ function loadData() {
   });
 }
 
-function showEmpty(isFifaSite, isSeatMap) {
+function showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent) {
   document.getElementById("noData").style.display = "block";
   document.getElementById("dashboard").style.display = "none";
   document.getElementById("liveBadge").style.display = "none";
@@ -172,7 +214,19 @@ function showEmpty(isFifaSite, isSeatMap) {
   const action = document.getElementById("emptyAction");
   const scanningHelp = document.getElementById("scanningHelp");
 
-  if (isSeatMap) {
+  if (isTicketmasterEvent) {
+    title.textContent = "Ready to Scan";
+    hint.textContent = "Click below to scan for available tickets on this event.";
+    action.textContent = "Scan Tickets";
+    action.style.display = "";
+    action.onclick = (e) => {
+      e.preventDefault();
+      startScan();
+    };
+    const lmsBtn = document.getElementById("emptyActionLms");
+    if (lmsBtn) lmsBtn.style.display = "none";
+    scanningHelp.style.display = "none";
+  } else if (isSeatMap) {
     title.textContent = "Scanning\u2026";
     hint.textContent = "Capturing seat data from the map. This usually takes a few seconds.";
     action.style.display = "none";
@@ -267,7 +321,8 @@ function renderMatchInfo(match) {
     const venue = parts[3] || "";
     const date = match.date ? formatDate(match.date) : "";
 
-    const siteBadge = `<span class="site-badge site-${currentSite}">${currentSite === "lms" ? "LMS" : "Resale"}</span>`;
+    const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", resale: "Resale" };
+    const siteBadge = `<span class="site-badge site-${currentSite}">${SITE_LABELS[currentSite] || "Resale"}</span>`;
     el.innerHTML = `
       <div class="match-top-row">
         <div class="match-teams">${escapeHtml(teams)} ${siteBadge}</div>
@@ -965,7 +1020,9 @@ function compareVersions(a, b) {
 
 // --- Utilities ---
 
-const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0 };
+// Ticketmaster prices are taken from the offer as-is (all-in where the API
+// gives it), so no fee is layered on top the way FIFA resale needs.
+const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0 };
 function centsToUSD(cents) { return cents / 1000 * (FEE_MULTIPLIER_BY_SITE[currentSite] ?? 1.15); }
 
 function formatPrice(n) {
@@ -1941,9 +1998,44 @@ function handleSaveAlerts() {
 
 function startScan() {
   getCurrentTabUrl().then((url) => {
+    const tabSite = siteFromUrl(url);
+    
+    if (tabSite === "ticketmaster") {
+      // Ticketmaster scan
+      const eventIdMatch = url.match(/\/event\/([A-F0-9]+)/i);
+      const eventId = eventIdMatch ? eventIdMatch[1] : null;
+      
+      if (!eventId) {
+        alert("Could not find event ID. Navigate to a Ticketmaster event page with a seating map.");
+        return;
+      }
+      
+      console.log("[FIFA Scout] Starting Ticketmaster scan for event:", eventId);
+
+      // Same dispatch path as the FIFA scan: background relays to the tab's
+      // content script, which postMessages into the MAIN world.
+      chrome.runtime.sendMessage({
+        type: "START_TICKETMASTER_SCAN",
+        eventId,
+        force: true,
+      });
+
+      // Clear and show scanning state
+      scanStartTime = Date.now();
+      scanElapsed = 0;
+      lastPillPct = 0;
+      lastMatchName = null;
+      document.getElementById("dashboard").style.display = "none";
+      document.getElementById("noData").style.display = "block";
+      document.getElementById("liveBadge").style.display = "none";
+      document.getElementById("emptyTitle").textContent = "Scanning...";
+      document.getElementById("emptyHint").textContent = "Fetching available seats from Ticketmaster...";
+      return;
+    }
+    
+    // FIFA scan (original logic)
     const perfIdMatch = url.match(/perfId=(\d+)/);
     const tabPerfId = perfIdMatch ? perfIdMatch[1] : null;
-    const tabSite = siteFromUrl(url);
 
     chrome.storage.local.get(null, (data) => {
       if (!data?.games) {
