@@ -620,7 +620,24 @@ function decodePlaceId(placeId) {
   return { section: parts[0], row: parts[1], seat: parts[2] };
 }
 
-// Prices live in _embedded.offer, keyed by the ids in each facet's `offers`.
+// Price comes off the facet itself: `listPriceRange` is an array of
+// { currency, min, max } in whole currency units (dollars, not cents) —
+// e.g. [{ "currency": "USD", "min": 371.00, "max": 371.00 }]. A facet groups
+// identically-priced listings, so min and max are usually equal; we take min.
+//
+// Confirmed against a live 2026-08-13 capture of event 0700646BCF6088AD.
+function facetListPrice(facet, currency = "USD") {
+  const ranges = facet?.listPriceRange;
+  if (!Array.isArray(ranges) || ranges.length === 0) return null;
+  // Prefer the requested currency; fall back to the first entry if the event
+  // is priced in something else entirely.
+  const match = ranges.find((r) => r?.currency === currency) || ranges[0];
+  const n = match?.min ?? match?.max;
+  return typeof n === "number" && isFinite(n) && n > 0 ? n : null;
+}
+
+// Fallback for responses where the facet carries no listPriceRange: prices may
+// also appear in _embedded.offer, keyed by the ids in each facet's `offers`.
 // Field naming there is not pinned down, so probe the plausible spellings and
 // fall back to the first numeric value that looks like a price.
 function buildOfferPriceMap(facetsData) {
@@ -680,7 +697,7 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site) {
 
       const area = descriptions[facet.description] || "";
       const category = (facet.inventoryTypes || [])[0] || "standard";
-      const dollars = offerPrices[(facet.offers || [])[0]] ?? null;
+      const dollars = facetListPrice(facet) ?? offerPrices[(facet.offers || [])[0]] ?? null;
       // Stored in thousandths to match centsToUSD() in the popup.
       const price = dollars != null ? Math.round(dollars * 1000) : null;
       if (price == null) missingPrice++;

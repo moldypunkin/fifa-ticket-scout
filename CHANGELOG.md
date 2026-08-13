@@ -4,6 +4,34 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## August 13, 2026 — v2.3.5
+
+### Fix: Ticketmaster Seats Imported Without Prices
+
+Ticketmaster seats were landing in the dashboard with no price. Price resolution read only `_embedded.offer`, probing a list of guessed field spellings (`totalPrice`, `faceValue`, `listPrice`, …) because the real field name had never been confirmed against a live response.
+
+A capture of event `0700646BCF6088AD` settled it: price is carried on the facet itself as `listPriceRange`, an array of `{ currency, min, max }` in whole dollars (`371.00`), not cents. A facet groups identically-priced listings, so `min` and `max` are normally equal and we take `min`, preferring the USD entry when an event lists multiple currencies. The `_embedded.offer` probe is kept as a fallback for responses that omit `listPriceRange`.
+
+The offer ids themselves are opaque routing handles — `GN6DCMRVGAYDOOBRGIZHYMJZHAZDCODBGQ2DK` decodes to `3|1250078122|198218a445` — so they were never going to yield a price on their own.
+
+Stored as `dollars * 1000` to match `centsToUSD()` in the popup, which applies a `1.0` fee multiplier for the `ticketmaster` site, so listed prices render through unchanged.
+
+**Files changed:** `extension/background.js`
+
+### Ticketmaster Support
+
+Added Ticketmaster as a second source alongside the FIFA resale site. A new adapter (`ticketmaster-adapter.js`) detects event pages, pulls the event id from the URL and the `c-tmpt` token from cookies, and calls the ISMDS facets endpoint. `injected.js` routes Ticketmaster scans to the adapter and posts the raw response through to the service worker, which does the parsing.
+
+Decoding seats out of a facets response takes two passes. Seats arrive packed into a `places` string under `compress=places`, first as nested bracket groups — `A[B,C]` is `AB` and `AC`, nesting arbitrarily — and each expanded id is then unpadded RFC 4648 base32 over `<section>:<row>:<seat>`, so `GEYDAORTGE5DEMY` decodes to section 100, row 31, seat 23. Verified against a live response: every facet's expanded place count matched its reported `count`.
+
+Two request-parameter details cost real debugging time. `embed` repeats once per value — passing an array to the `URLSearchParams` constructor stringifies it to `area,description`, which the API rejects. And `embed=offer` is what makes prices resolvable at all; without it the response still lists every seat, but each facet references only an opaque offer id.
+
+Site discrimination runs off the hostname (`siteFromUrl`), seats are namespaced under a `ticketmaster:<eventId>` game key, and the popup gained a Ticketmaster empty state plus a `1.0` fee multiplier (its listed prices are already all-in, unlike the FIFA resale site's `1.15`).
+
+**Files changed:** `extension/manifest.json`, `extension/ticketmaster-adapter.js`, `extension/injected.js`, `extension/content.js`, `extension/background.js`, `extension/popup.js`, `extension/popup.html`, `extension/popup.css`
+
+---
+
 ## April 20, 2026 — v2.3.4
 
 ### Per-License Alert Pick Overrides
