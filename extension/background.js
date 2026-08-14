@@ -358,7 +358,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const tabId = sender?.tab?.id;
 
   if (message.type === "API_RESPONSE") {
-    processApiResponse(message.url, message.body, tabId);
+    processApiResponse(message.url, message.body, tabId, message.eventInfo);
   }
   if (message.type === "CLEAR_DATA") {
     chrome.storage.session.remove("scannedGames");
@@ -487,7 +487,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-async function processApiResponse(url, body, tabId) {
+async function processApiResponse(url, body, tabId, eventInfo) {
   if (!body) return;
 
   const site = siteFromUrl(url);
@@ -538,7 +538,7 @@ async function processApiResponse(url, body, tabId) {
     const eventId = eventIdMatch ? eventIdMatch[1] : null;
     if (eventId) {
       await enforceGameLimit(`${site}:${eventId}`);
-      await saveTicketmasterSeats(eventId, body, tabId, site);
+      await saveTicketmasterSeats(eventId, body, tabId, site, eventInfo);
     }
   }
 
@@ -668,7 +668,7 @@ function buildOfferPriceMap(facetsData) {
 }
 
 // Save Ticketmaster seat data from facets
-async function saveTicketmasterSeats(eventId, facetsData, tabId, site) {
+async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo) {
   if (!facetsData || !Array.isArray(facetsData.facets)) return;
 
   const gameKey = `${site}:${eventId}`;
@@ -676,6 +676,20 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site) {
   const games = data.games || {};
 
   if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  // Same shape saveMatchInfo() builds for FIFA, so the popup header and the
+  // CSV export read it without caring which site it came from. Only overwrite
+  // when the page actually yielded a name — a later scan that failed to read
+  // the DOM shouldn't wipe a good value.
+  if (eventInfo && eventInfo.name) {
+    games[gameKey].match = {
+      name: eventInfo.name,
+      date: eventInfo.date || null,
+      venue: eventInfo.venue || null,
+      currency: "USD",
+      performanceId: eventId,
+    };
+  }
 
   // descriptionId -> human text ("Lower level of stadium")
   const descriptions = {};

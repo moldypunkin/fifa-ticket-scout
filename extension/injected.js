@@ -218,11 +218,18 @@
         return;
       }
 
+      // Event name/date come off the page, not the facets response, so they
+      // ride alongside the body rather than inside it.
+      const eventInfo = window.__ticketmasterAdapter.getEventInfo
+        ? window.__ticketmasterAdapter.getEventInfo()
+        : null;
+
       window.postMessage({
         type: "FIFA_TICKET_SCOUT",
         url: `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets`,
         body: facetsData,
         site: "ticketmaster",
+        eventInfo,
       }, "*");
       console.log("[FIFA Ticket Scout] Ticketmaster scan complete, sent data to background");
 

@@ -199,6 +199,7 @@ function loadData() {
 
       currentPerfId = activeKey;
       currentSite = game.site || "resale";
+      setBrand(currentSite);
       renderDashboard(game);
     });
   });
@@ -208,6 +209,10 @@ function showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent) {
   document.getElementById("noData").style.display = "block";
   document.getElementById("dashboard").style.display = "none";
   document.getElementById("liveBadge").style.display = "none";
+
+  // No game is loaded here, so brand off the tab we're sitting on rather than
+  // `currentSite` — that still holds whichever site was last rendered.
+  setBrand(isTicketmasterEvent ? "ticketmaster" : "resale");
 
   const title = document.getElementById("emptyTitle");
   const hint = document.getElementById("emptyHint");
@@ -315,13 +320,14 @@ function renderMatchInfo(match) {
   lastMatchName = match?.name ?? null;
 
   if (match?.name) {
+    // FIFA packs "… / matchNum / teams / venue" into one string; Ticketmaster
+    // has no such delimiter and supplies venue as its own field.
     const parts = match.name.split(" / ");
     const matchNum = parts[1] || "";
     const teams = parts[2] || match.name;
-    const venue = parts[3] || "";
+    const venue = parts[3] || match.venue || "";
     const date = match.date ? formatDate(match.date) : "";
 
-    const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", resale: "Resale" };
     const siteBadge = `<span class="site-badge site-${currentSite}">${SITE_LABELS[currentSite] || "Resale"}</span>`;
     el.innerHTML = `
       <div class="match-top-row">
@@ -354,6 +360,28 @@ let scanStartTime = 0;
 let scanElapsed = 0;
 let currentPerfId = null;
 let currentSite = "resale";
+
+// Shared by the per-match site badge and the header brand below, so the two can
+// never disagree about what site the popup is showing.
+const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", resale: "Resale" };
+
+// The header follows the active site. `lms` and `resale` are both FIFA
+// properties, so they keep the original name.
+const SITE_BRANDS = {
+  lms: "FIFA Ticket Scout",
+  resale: "FIFA Ticket Scout",
+  ticketmaster: "Ticketmaster Scout",
+};
+
+function setBrand(site) {
+  const name = SITE_BRANDS[site] || SITE_BRANDS.resale;
+  const title = document.getElementById("brandTitle");
+  const logo = document.getElementById("brandLogo");
+  if (title) title.textContent = name;
+  // Keep alt in step with the visible text rather than letting it go stale.
+  if (logo) logo.alt = name;
+  document.title = name;
+}
 
 function formatElapsed(ms) {
   const s = Math.round(ms / 1000);
@@ -956,6 +984,9 @@ function exportCSV() {
     const meta = [
       `# Match: ${match?.name || "Unknown"}`,
       `# Date: ${match?.date || "Unknown"}`,
+      // Only FIFA folds the venue into `name`; Ticketmaster keeps it separate,
+      // so surface it rather than losing it from the export.
+      ...(match?.venue ? [`# Venue: ${match.venue}`] : []),
       `# Currency: ${match?.currency || "USD"}`,
       `# Site: ${game.site || "resale"}`,
       `# Performance ID: ${game.match?.performanceId || activeId}`,
@@ -2030,6 +2061,7 @@ function startScan() {
       document.getElementById("liveBadge").style.display = "none";
       document.getElementById("emptyTitle").textContent = "Scanning...";
       document.getElementById("emptyHint").textContent = "Fetching available seats from Ticketmaster...";
+      setBrand("ticketmaster");
       return;
     }
     

@@ -52,6 +52,76 @@
     }
   }
 
+  // ─── Event name / date ──────────────────────────────────────────────────
+  // The facets endpoint returns seats and prices only — no event identity. The
+  // page itself carries it, so read it from there.
+
+  // "2026-06-15T19:00:00-04:00" -> "15-06-2026 - 19:00", the format
+  // formatDate() in the popup already parses (it returns its input untouched
+  // on anything else, so a miss degrades to a raw string rather than a crash).
+  //
+  // The wall-clock components are taken verbatim rather than via `new Date()`:
+  // Ticketmaster publishes venue-local time, and converting into the viewer's
+  // timezone would misstate kickoff for anyone not in the venue's zone.
+  function normalizeEventDate(iso) {
+    if (typeof iso !== "string") return null;
+    const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/);
+    if (!m) return null;
+    const [, year, month, day, hh, mm] = m;
+    return `${day}-${month}-${year}` + (hh ? ` - ${hh}:${mm}` : "");
+  }
+
+  // "Portugal vs. Spain Tickets | Ticketmaster" -> "Portugal vs. Spain"
+  function cleanTitle(raw) {
+    if (typeof raw !== "string") return null;
+    const cleaned = raw
+      .split("|")[0]
+      .replace(/\s+Tickets\b.*$/i, "")
+      .trim();
+    return cleaned || null;
+  }
+
+  // JSON-LD first — it is structured and unambiguous. og:title and
+  // document.title are lossy fallbacks for when the markup shifts.
+  function getTicketmasterEventInfo() {
+    const info = { name: null, date: null, venue: null };
+
+    try {
+      for (const el of document.querySelectorAll('script[type="application/ld+json"]')) {
+        let parsed;
+        try {
+          parsed = JSON.parse(el.textContent);
+        } catch (e) {
+          continue; // one malformed block shouldn't sink the rest
+        }
+
+        // A block may be a single node, an array, or wrapped in @graph.
+        const nodes = [].concat(parsed && parsed["@graph"] ? parsed["@graph"] : parsed || []);
+        for (const node of nodes) {
+          // "Event", but also "SportsEvent", "MusicEvent", …
+          const types = [].concat((node && node["@type"]) || []);
+          if (!types.some((t) => typeof t === "string" && t.endsWith("Event"))) continue;
+
+          if (!info.name && node.name) info.name = String(node.name).trim();
+          if (!info.date) info.date = normalizeEventDate(node.startDate);
+          const loc = Array.isArray(node.location) ? node.location[0] : node.location;
+          if (!info.venue && loc && loc.name) info.venue = String(loc.name).trim();
+        }
+      }
+    } catch (e) {
+      console.log("[TM] Error reading JSON-LD:", e.message);
+    }
+
+    if (!info.name) {
+      const og = document.querySelector('meta[property="og:title"]');
+      if (og && og.content) info.name = cleanTitle(og.content);
+    }
+    if (!info.name) info.name = cleanTitle(document.title);
+
+    console.log(`[TM] Event info: name=${info.name || "?"} date=${info.date || "?"} venue=${info.venue || "?"}`);
+    return info;
+  }
+
   // Generate unique correlation ID for each request
   function generateCorrelationId() {
     return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -156,6 +226,7 @@
   window.__ticketmasterAdapter = {
     isTicketmasterSite,
     getEventId: getTicketmasterEventId,
+    getEventInfo: getTicketmasterEventInfo,
     getToken: getTicketmasterToken,
     fetchFacets: fetchTicketmasterFacets,
     parseSeats: parseTicketmasterSeats,
