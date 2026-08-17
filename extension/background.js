@@ -5,6 +5,7 @@ function siteFromUrl(url) {
   try {
     const h = new URL(url).hostname;
     if (h.includes("ticketmaster")) return "ticketmaster";
+    if (h.includes("seatgeek")) return "seatgeek";
     if (h.includes("-resale-")) return "resale";
     if (h.includes("-shop-"))   return "lms";
   } catch {}
@@ -542,6 +543,17 @@ async function processApiResponse(url, body, tabId, eventInfo) {
     }
   }
 
+  // SeatGeek listings — captured passively from the page's own request.
+  if (site === "seatgeek" && url.includes("/api/event_listings_v2") && Array.isArray(body.listings)) {
+    // The event id is the `id` query param; fall back to the `e` field the
+    // listings themselves carry.
+    const eventId = extractParam(url, "id") || String(body.listings[0]?.e || "");
+    if (eventId) {
+      await enforceGameLimit(`${site}:${eventId}`);
+      await saveSeatGeekSeats(eventId, body, tabId, site, eventInfo);
+    }
+  }
+
   notifyDataUpdated();
 }
 
@@ -749,6 +761,104 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
 
   // tabGameMap is the module-level in-memory map every other save path uses;
   // it is deliberately not persisted to storage.
+  if (tabId) tabGameMap[tabId] = gameKey;
+  await chrome.storage.local.set({ games });
+}
+
+// ─── SeatGeek listings ────────────────────────────────────────────────────
+// One entry per listing, with short field names. Confirmed against a live
+// capture of event 18014270 (979 listings):
+//
+//   s/sf/sr  section — "242" / "Section 242" / "242"
+//   r/rf/rr  row     — "2"   / "Row 2"       / "2"
+//   ss       seat numbers, e.g. ["3","4"] (present because the page requests
+//            `_include_seats=1`; absent on listings that don't expose seats)
+//   q        quantity
+//   p        base price per ticket   (850)
+//   f        fees per ticket         (145.25)
+//   pf       all-in price per ticket (995.25 = p + f)
+//
+// `pf` is what we store: it matches the all-in convention Ticketmaster uses,
+// which is why FEE_MULTIPLIER_BY_SITE leaves seatgeek at 1.0.
+function seatGeekPrice(listing) {
+  const candidates = [listing.pf, listing.p != null && listing.f != null ? listing.p + listing.f : null, listing.p];
+  for (const c of candidates) {
+    if (typeof c === "number" && isFinite(c) && c > 0) return c;
+  }
+  return null;
+}
+
+async function saveSeatGeekSeats(eventId, body, tabId, site, eventInfo) {
+  if (!body || !Array.isArray(body.listings)) return;
+
+  const gameKey = `${site}:${eventId}`;
+  const data = await getStorage();
+  const games = data.games || {};
+
+  if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  if (eventInfo && eventInfo.name) {
+    games[gameKey].match = {
+      name: eventInfo.name,
+      date: eventInfo.date || null,
+      venue: eventInfo.venue || null,
+      currency: body.currency || "USD",
+      performanceId: eventId,
+    };
+  }
+
+  const seats = {};
+  let missingPrice = 0;
+  let seatless = 0;
+
+  try {
+    for (const listing of body.listings) {
+      const dollars = seatGeekPrice(listing);
+      if (dollars == null) { missingPrice++; continue; }
+      // Stored in thousandths to match centsToUSD() in the popup.
+      const price = Math.round(dollars * 1000);
+
+      const block = String(listing.s ?? listing.sr ?? "");
+      const row = String(listing.r ?? listing.rr ?? "");
+      const qty = Number(listing.q) || 1;
+
+      // `ss` gives real seat numbers. Without it we still know how many seats
+      // the listing holds, so emit that many rows with a blank seat rather
+      // than dropping inventory the dashboard should be counting.
+      const seatNumbers = Array.isArray(listing.ss) && listing.ss.length
+        ? listing.ss.map(String)
+        : (seatless++, Array.from({ length: qty }, () => ""));
+
+      seatNumbers.forEach((seatNo, i) => {
+        // Listing ids are unique; index disambiguates seats within one.
+        const key = `${listing.id || `${block}-${row}`}-${seatNo || i}`;
+        seats[key] = {
+          block,
+          row,
+          seat: String(seatNo),
+          area: listing.sf || "",
+          category: listing.m || "resale",
+          price,
+          exclusive: true,
+          site: "seatgeek",
+          accessible: false,
+          attributes: [],
+        };
+      });
+    }
+  } catch (error) {
+    console.log("[background] Error parsing SeatGeek listings:", error.message);
+  }
+
+  const total = Object.keys(seats).length;
+  console.log(`[background] SeatGeek: ${total} seats from ${body.listings.length} listings` +
+    (missingPrice ? `, ${missingPrice} had no price` : "") +
+    (seatless ? `, ${seatless} had no seat numbers` : ""));
+
+  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].site = site;
+  games[gameKey].lastScanned = Date.now();
+
   if (tabId) tabGameMap[tabId] = gameKey;
   await chrome.storage.local.set({ games });
 }

@@ -8,11 +8,14 @@
   // Detect which ticketing site we're on
   const isTicketmaster = window.location.hostname.includes('ticketmaster.com');
   const isFifa = window.location.hostname.includes('tickets.fifa.com');
-  
+  const isSeatGeek = window.location.hostname.includes('seatgeek.com');
+
   if (isTicketmaster) {
     console.log("[FIFA Ticket Scout] Running on Ticketmaster (will use adapter)");
   } else if (isFifa) {
     console.log("[FIFA Ticket Scout] Running on FIFA (using FIFA logic)");
+  } else if (isSeatGeek) {
+    console.log("[FIFA Ticket Scout] Running on SeatGeek (endpoint discovery mode)");
   } else {
     console.log("[FIFA Ticket Scout] Unknown ticketing site - no action");
     return;
@@ -20,7 +23,16 @@
 
   // For Ticketmaster, only capture requests we explicitly make (during extension scan)
   // NOT the page's own requests - that interferes with inventory display
-  const MATCH_PATTERNS = isTicketmaster ? [] : ["/seatmap/", "/performance/"];
+  // SeatGeek is passive capture: the page fetches its own 880kB inventory on
+  // load, so we read that response rather than issuing a request of our own.
+  // That keeps us clear of `scrape_uuid`, the Talos anti-tamper layer and
+  // DataDome, and avoids having to forge per-session ids like
+  // `event_page_view_id` / `sixpack_client_id`.
+  const MATCH_PATTERNS = isTicketmaster
+    ? []
+    : isSeatGeek
+      ? ["/api/event_listings_v2"]
+      : ["/seatmap/", "/performance/"];
 
   // Defense-in-depth: prevent duplicate scans at the page level.
   // injected.js lives as long as the page — survives SW restarts.
@@ -32,8 +44,35 @@
   function shouldCapture(url) {
     // For Ticketmaster, never auto-capture page requests
     if (isTicketmaster) return false;
-    // For FIFA, use normal pattern matching
+    // FIFA and SeatGeek both match on their own patterns.
     return MATCH_PATTERNS.some((p) => url.includes(p));
+  }
+
+  // Pages may call fetch/XHR with a relative URL — SeatGeek requests
+  // "/api/event_listings_v2?…" that way. Everything downstream (siteFromUrl,
+  // extractParam) builds a `new URL()`, which throws on a relative string and
+  // silently drops the capture, so resolve before posting. Absolute URLs pass
+  // through unchanged.
+  function toAbsoluteUrl(u) {
+    try {
+      return new URL(String(u), window.location.href).href;
+    } catch (e) {
+      return String(u);
+    }
+  }
+
+  // SeatGeek's inventory response carries no event name/date, so attach what
+  // the adapter reads off the page. Undefined elsewhere: the FIFA paths get
+  // match info from their own API, and Ticketmaster attaches it at scan time.
+  function seatGeekEventInfo() {
+    if (!isSeatGeek) return undefined;
+    try {
+      return window.__seatgeekAdapter
+        ? window.__seatgeekAdapter.getEventInfo()
+        : undefined;
+    } catch (e) {
+      return undefined;
+    }
   }
 
   // Capture headers from real requests so the scan can reuse them
@@ -51,7 +90,7 @@
   //      chatty enough to blow out the buffer in seconds.
   //   2. Guard re-entrancy. Our postMessage is observed by the listener below,
   //      and anything that logs while handling a message would loop forever.
-  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[TM]"];
+  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[TM]", "[SG]", "[SG-PROBE]"];
   const originalLog = console.log;
   let relayingLog = false;
   console.log = function (...args) {
@@ -101,7 +140,7 @@
         const clone = response.clone();
         const body = await clone.json();
         window.postMessage(
-          { type: "FIFA_TICKET_SCOUT", url, body },
+          { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(url), body, eventInfo: seatGeekEventInfo() },
           "*"
         );
       } catch {
@@ -142,7 +181,7 @@
         try {
           const body = JSON.parse(this.responseText);
           window.postMessage(
-            { type: "FIFA_TICKET_SCOUT", url: this._ftsUrl, body },
+            { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(this._ftsUrl), body, eventInfo: seatGeekEventInfo() },
             "*"
           );
         } catch {

@@ -131,6 +131,7 @@ function siteFromUrl(url) {
   try {
     const h = new URL(url).hostname;
     if (h.includes("ticketmaster")) return "ticketmaster";
+    if (h.includes("seatgeek")) return "seatgeek";
     if (h.includes("-shop-")) return "lms";
     if (h.includes("-resale-")) return "resale";
   } catch {}
@@ -145,10 +146,16 @@ function loadData() {
     const tmEventMatch = isTicketmasterSite && url.match(/\/event\/([A-F0-9]+)/i);
     const tmEventId = tmEventMatch ? tmEventMatch[1] : null;
     const isTicketmasterEvent = !!tmEventId;
+    // SeatGeek event ids are the trailing numeric path segment — same rule the
+    // adapter uses. See getSeatGeekEventId() in seatgeek-adapter.js.
+    const isSeatGeekSite = /seatgeek\.com/.test(url);
+    const sgEventMatch = isSeatGeekSite && (url.match(/\/e\/(\d+)/) || url.match(/\/(\d{5,})(?:[/?#]|$)/));
+    const sgEventId = sgEventMatch ? sgEventMatch[1] : null;
+    const isSeatGeekEvent = !!sgEventId;
 
     chrome.storage.local.get(null, (data) => {
       if (chrome.runtime.lastError || !data?.games) {
-        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent);
+        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent);
         return;
       }
 
@@ -156,7 +163,7 @@ function loadData() {
       const gameKeys = Object.keys(games);
 
       if (gameKeys.length === 0) {
-        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent);
+        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent);
         return;
       }
 
@@ -172,6 +179,10 @@ function loadData() {
         // while the user is looking at a Ticketmaster event.
         const tmKey = `ticketmaster:${tmEventId}`;
         if (games[tmKey]) activeKey = tmKey;
+      } else if (sgEventId) {
+        // Same exactness rule as Ticketmaster above.
+        const sgKey = `seatgeek:${sgEventId}`;
+        if (games[sgKey]) activeKey = sgKey;
       } else if (tabPerfId) {
         const preferred = `${tabSite}:${tabPerfId}`;
         const other = `${tabSite === "lms" ? "resale" : "lms"}:${tabPerfId}`;
@@ -182,12 +193,12 @@ function loadData() {
       if (!activeKey && tabPerfId && games[tabPerfId]) {
         activeKey = tabPerfId;
       }
-      if (!activeKey && !isTicketmasterEvent) activeKey = gameKeys[0];
+      if (!activeKey && !isTicketmasterEvent && !isSeatGeekEvent) activeKey = gameKeys[0];
 
       const game = activeKey ? games[activeKey] : null;
 
       if (!game || Object.keys(game.seats || {}).length === 0) {
-        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent);
+        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent);
         return;
       }
 
@@ -205,14 +216,14 @@ function loadData() {
   });
 }
 
-function showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent) {
+function showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent) {
   document.getElementById("noData").style.display = "block";
   document.getElementById("dashboard").style.display = "none";
   document.getElementById("liveBadge").style.display = "none";
 
   // No game is loaded here, so brand off the tab we're sitting on rather than
   // `currentSite` — that still holds whichever site was last rendered.
-  setBrand(isTicketmasterEvent ? "ticketmaster" : "resale");
+  setBrand(isTicketmasterEvent ? "ticketmaster" : isSeatGeekEvent ? "seatgeek" : "resale");
 
   const title = document.getElementById("emptyTitle");
   const hint = document.getElementById("emptyHint");
@@ -228,6 +239,15 @@ function showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent) {
       e.preventDefault();
       startScan();
     };
+    const lmsBtn = document.getElementById("emptyActionLms");
+    if (lmsBtn) lmsBtn.style.display = "none";
+    scanningHelp.style.display = "none";
+  } else if (isSeatGeekEvent) {
+    // SeatGeek is passive capture, not an explicit scan — the listings arrive
+    // with the page's own request, so there is no button to press.
+    title.textContent = "Waiting for listings…";
+    hint.textContent = "Reload this SeatGeek event page and the tickets will be captured automatically.";
+    action.style.display = "none";
     const lmsBtn = document.getElementById("emptyActionLms");
     if (lmsBtn) lmsBtn.style.display = "none";
     scanningHelp.style.display = "none";
@@ -363,7 +383,7 @@ let currentSite = "resale";
 
 // Shared by the per-match site badge and the header brand below, so the two can
 // never disagree about what site the popup is showing.
-const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", resale: "Resale" };
+const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", resale: "Resale" };
 
 // The header follows the active site. `lms` and `resale` are both FIFA
 // properties, so they keep the original name.
@@ -371,6 +391,7 @@ const SITE_BRANDS = {
   lms: "FIFA Ticket Scout",
   resale: "FIFA Ticket Scout",
   ticketmaster: "Ticketmaster Scout",
+  seatgeek: "SeatGeek Scout",
 };
 
 function setBrand(site) {
@@ -1053,7 +1074,11 @@ function compareVersions(a, b) {
 
 // Ticketmaster prices are taken from the offer as-is (all-in where the API
 // gives it), so no fee is layered on top the way FIFA resale needs.
-const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0 };
+//
+// seatgeek is 1.0 pending a real capture: SeatGeek shows pre-fee prices by
+// default, so this likely needs a multiplier once the listings response
+// confirms whether its prices include fees.
+const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0 };
 function centsToUSD(cents) { return cents / 1000 * (FEE_MULTIPLIER_BY_SITE[currentSite] ?? 1.15); }
 
 function formatPrice(n) {
