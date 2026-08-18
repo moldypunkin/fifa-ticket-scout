@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FIFA Ticket Scout",
-  "version": "2.3.5",
+  "version": "2.4.0",
   "description": "Real-time price tracking for FIFA World Cup 2026 resale tickets. See every seat, every price, at a glance.",
   "permissions": [
     "storage",
@@ -16,6 +16,7 @@
     "*://*.seatgeek.com/*",
     "*://*.stubhub.com/*",
     "*://*.evenue.net/*",
+    "*://*.tickpick.com/*",
     "https://api.gumroad.com/*",
     "https://yaydpahqlqwesqdddgfi.supabase.co/*",
     "https://raw.githubusercontent.com/*"
@@ -76,6 +77,17 @@
     },
     {
       "matches": ["*://*.evenue.net/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["*://*.tickpick.com/*"],
+      "js": ["event-info.js", "tickpick-adapter.js", "injected.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://*.tickpick.com/*"],
       "js": ["content.js"],
       "run_at": "document_start"
     }

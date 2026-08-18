@@ -11,6 +11,7 @@
   const isSeatGeek = window.location.hostname.includes('seatgeek.com');
   const isStubHub = window.location.hostname.includes('stubhub.com');
   const isEvenue = window.location.hostname.includes('evenue.net');
+  const isTickPick = window.location.hostname.includes('tickpick.com');
 
   if (isTicketmaster) {
     console.log("[FIFA Ticket Scout] Running on Ticketmaster (will use adapter)");
@@ -21,7 +22,9 @@
   } else if (isStubHub) {
     console.log("[FIFA Ticket Scout] Running on StubHub (passive capture)");
   } else if (isEvenue) {
-    console.log("[FIFA Ticket Scout] Running on Evenue (endpoint discovery mode)");
+    console.log("[FIFA Ticket Scout] Running on Evenue (passive capture)");
+  } else if (isTickPick) {
+    console.log("[FIFA Ticket Scout] Running on TickPick (endpoint discovery mode)");
   } else {
     console.log("[FIFA Ticket Scout] Unknown ticketing site - no action");
     return;
@@ -45,7 +48,9 @@
         ? ["/event/"]
         : isEvenue
           ? ["/pac-api/seat-availability/"]
-          : ["/seatmap/", "/performance/"];
+          : isTickPick
+            ? ["/listings/internal/event-v2/"]
+            : ["/seatmap/", "/performance/"];
 
   // Defense-in-depth: prevent duplicate scans at the page level.
   // injected.js lives as long as the page — survives SW restarts.
@@ -57,7 +62,7 @@
   function shouldCapture(url) {
     // For Ticketmaster, never auto-capture page requests
     if (isTicketmaster) return false;
-    // FIFA, SeatGeek, StubHub and Evenue all match on their own patterns.
+    // FIFA, SeatGeek, StubHub, Evenue and TickPick match on their own patterns.
     return MATCH_PATTERNS.some((p) => url.includes(p));
   }
 
@@ -238,10 +243,24 @@
           console.log(`${tag}   r${r}: ${JSON.stringify(parent[r]).slice(0, 400)}`);
         }
       } else {
-        const json = JSON.stringify(pick.sample);
-        for (let i = 0; i < Math.min(json.length, 1500); i += 500) {
-          console.log(`${tag}   s[${i}]: ${json.slice(i, i + 500)}`);
+        // Sample first / middle / last, not just [0]. Feeds are commonly
+        // grouped, so element 0 is often unrepresentative — TickPick sorts
+        // parking passes ahead of tickets, and a single sample there would
+        // have described the wrong kind of row entirely.
+        const parent = pick.parent || [];
+        const objs = parent.filter((v) => v && typeof v === "object");
+        const picks = [];
+        const want = [0, Math.floor(objs.length / 2), objs.length - 1];
+        for (const i of want) {
+          if (objs[i] !== undefined && !picks.includes(objs[i])) picks.push(objs[i]);
         }
+        picks.forEach((obj, n) => {
+          const json = JSON.stringify(obj);
+          const label = n === 0 ? "first" : n === picks.length - 1 ? "last" : "middle";
+          for (let i = 0; i < Math.min(json.length, 1000); i += 500) {
+            console.log(`${tag}   ${label}[${i}]: ${json.slice(i, i + 500)}`);
+          }
+        });
       }
     }
   }
@@ -268,6 +287,7 @@
       const adapter = isSeatGeek ? window.__seatgeekAdapter
         : isStubHub ? window.__stubhubAdapter
         : isEvenue ? window.__evenueAdapter
+        : isTickPick ? window.__tickpickAdapter
         : null;
       return adapter ? adapter.getEventInfo() : undefined;
     } catch (e) {
@@ -290,7 +310,7 @@
   //      chatty enough to blow out the buffer in seconds.
   //   2. Guard re-entrancy. Our postMessage is observed by the listener below,
   //      and anything that logs while handling a message would loop forever.
-  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[TM]", "[SG]", "[SH]", "[EV]", "[EV-PROBE]", "[SH-PROBE]"];
+  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[TM]", "[SG]", "[SH]", "[EV]", "[TP]", "[TP-PROBE]", "[EV-PROBE]", "[SH-PROBE]"];
   const originalLog = console.log;
   let relayingLog = false;
   console.log = function (...args) {

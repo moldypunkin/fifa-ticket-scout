@@ -50,8 +50,9 @@
   }
 
   // Shared with the other adapters — see event-info.js, loaded first.
-  // Evenue may not publish JSON-LD; if not, this returns nulls and the event
-  // name simply stays unknown until we find where the page keeps it.
+  // Evenue does publish usable JSON-LD: name/date/venue come through on a
+  // real event page (confirmed 2026-08-18), so no site-specific fallback is
+  // needed here.
   function getEvenueEventInfo() {
     if (!window.__eventInfo) {
       console.log("[EV] event-info.js not loaded — no event name/date");

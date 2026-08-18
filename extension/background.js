@@ -8,6 +8,7 @@ function siteFromUrl(url) {
     if (h.includes("seatgeek")) return "seatgeek";
     if (h.includes("stubhub")) return "stubhub";
     if (h.includes("evenue")) return "evenue";
+    if (h.includes("tickpick")) return "tickpick";
     if (h.includes("-resale-")) return "resale";
     if (h.includes("-shop-"))   return "lms";
   } catch {}
@@ -545,6 +546,16 @@ async function processApiResponse(url, body, tabId, eventInfo) {
     }
   }
 
+  // TickPick listings — captured passively from the page's own API call.
+  if (site === "tickpick" && url.includes("/listings/internal/event-v2/") && Array.isArray(body.listings)) {
+    const m = url.match(/event-v2\/(\d+)/);
+    const eventId = m ? m[1] : String((body.listings[0] || {}).eid || "");
+    if (eventId) {
+      await enforceGameLimit(`${site}:${eventId}`);
+      await saveTickPickSeats(eventId, body, tabId, site, eventInfo);
+    }
+  }
+
   // Evenue seat availability — captured passively.
   if (site === "evenue" && url.includes("/pac-api/seat-availability/") && Array.isArray(body)) {
     const m = url.match(/event-id\/([^/?]+)/);
@@ -1037,7 +1048,8 @@ async function saveStubHubSeats(eventId, body, tabId, site, eventInfo) {
 //   SEATCD          "1"       seat
 //   PRICELEVELCD    "4"       price tier
 //   SEATSTATUS      "O"/"%"   O = open; other codes are holds/sold
-//   SLP_PRICE       32039     price in CENTS -> $320.39
+//   SLP_PRICE       32039     price in CENTS -> $320.39 (confirmed
+//                             against the site 2026-08-18)
 //   AVAILABLE       0/1       the authoritative flag
 //   HIDDEN          0/1
 //
@@ -1140,6 +1152,125 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
   const total = Object.keys(seats).length;
   console.log(`[background] Evenue: ${total} available seats from ${rows.length} rows` +
     (unavailable ? `, ${unavailable} unavailable/hidden` : "") +
+    (missingPrice ? `, ${missingPrice} had no price` : ""));
+
+  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].site = site;
+  games[gameKey].lastScanned = Date.now();
+
+  if (tabId) tabGameMap[tabId] = gameKey;
+  await chrome.storage.local.set({ games });
+}
+
+// ─── TickPick listings ────────────────────────────────────────────────────
+// GET api.tickpick.com/1.0/listings/internal/event-v2/<eventId>
+// Confirmed against event 7730191 (3,009 listings):
+//
+//   sid   "307"        section
+//   r     "4"          row (ri is the same value numeric)
+//   lid   "300s"       level / zone label
+//   q     4            tickets in the listing
+//   p     517          price per ticket, in DOLLARS
+//   fv    320          face value
+//   sp    [4,3,2,1]    permitted split sizes
+//   sd    [83]         seat_details ids -> disclosures ("ObstructedView")
+//   is_pk true         PARKING, not a seat — excluded
+//
+// TickPick exposes no seat numbers, so a listing becomes `q` rows with a
+// blank seat, the same shape StubHub uses for its seatless listings.
+function tickPickPrice(listing) {
+  const candidates = [listing.p, listing.fv];
+  for (const c of candidates) {
+    const n = typeof c === "string" ? parseFloat(c) : c;
+    if (typeof n === "number" && isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+// Parking passes and other non-seat inventory. `is_pk` is the flag; the
+// "PARKING LOTS" section name is a belt-and-braces fallback in case a feed
+// omits it.
+function tickPickIsParking(listing) {
+  if (listing.is_pk === true) return true;
+  return /parking/i.test(String(listing.sid || ""));
+}
+
+// sd -> ["ObstructedView", …] via the payload's seat_details lookup, so a
+// disclosure that matters to a buyer is not silently dropped.
+function tickPickDisclosures(listing, seatDetails) {
+  const ids = Array.isArray(listing.sd) ? listing.sd : [];
+  if (!ids.length || !seatDetails) return [];
+  const out = [];
+  for (const id of ids) {
+    const entry = seatDetails[String(id)];
+    const md = entry && Array.isArray(entry.md) ? entry.md : [];
+    for (const item of md) {
+      if (item && item.val) out.push(String(item.val));
+    }
+  }
+  return out;
+}
+
+async function saveTickPickSeats(eventId, body, tabId, site, eventInfo) {
+  if (!body || !Array.isArray(body.listings)) return;
+
+  const gameKey = `${site}:${eventId}`;
+  const data = await getStorage();
+  const games = data.games || {};
+  if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  if (eventInfo && eventInfo.name) {
+    games[gameKey].match = {
+      name: eventInfo.name,
+      date: eventInfo.date || null,
+      venue: eventInfo.venue || null,
+      currency: "USD",
+      performanceId: eventId,
+    };
+  }
+
+  const seatDetails = body.seat_details || null;
+  const seats = {};
+  let parking = 0;
+  let missingPrice = 0;
+
+  try {
+    for (const listing of body.listings) {
+      if (!listing) continue;
+      if (tickPickIsParking(listing)) { parking++; continue; }
+
+      const dollars = tickPickPrice(listing);
+      if (dollars == null) { missingPrice++; continue; }
+      // Stored in thousandths to match centsToUSD() in the popup.
+      const price = Math.round(dollars * 1000);
+
+      const block = String(listing.sid != null ? listing.sid : "");
+      const row = String(listing.r != null ? listing.r : "");
+      const qty = Number(listing.q) || 1;
+      const disclosures = tickPickDisclosures(listing, seatDetails);
+
+      for (let i = 0; i < qty; i++) {
+        seats[`${listing.id || `${block}-${row}`}-${i}`] = {
+          block,
+          row,
+          seat: "",
+          area: String(listing.lid || ""),
+          category: "resale",
+          price,
+          exclusive: true,
+          site: "tickpick",
+          accessible: false,
+          attributes: disclosures,
+        };
+      }
+    }
+  } catch (error) {
+    console.log("[background] Error parsing TickPick listings:", error.message);
+  }
+
+  const total = Object.keys(seats).length;
+  console.log(`[background] TickPick: ${total} seats from ${body.listings.length} listings` +
+    (parking ? `, ${parking} parking excluded` : "") +
     (missingPrice ? `, ${missingPrice} had no price` : ""));
 
   games[gameKey].seats = { ...games[gameKey].seats, ...seats };

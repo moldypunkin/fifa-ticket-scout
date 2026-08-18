@@ -134,6 +134,7 @@ function siteFromUrl(url) {
     if (h.includes("seatgeek")) return "seatgeek";
     if (h.includes("stubhub")) return "stubhub";
     if (h.includes("evenue")) return "evenue";
+    if (h.includes("tickpick")) return "tickpick";
     if (h.includes("-shop-")) return "lms";
     if (h.includes("-resale-")) return "resale";
   } catch {}
@@ -176,10 +177,16 @@ function loadData() {
       }
     }
     const isEvenueEvent = !!evEventId;
+    // TickPick: numeric id at the end of the path. Mirrors
+    // getTickPickEventId() in tickpick-adapter.js.
+    const isTickPickSite = /tickpick\.com/.test(url);
+    const tpEventMatch = isTickPickSite && (url.match(/\/e\/(\d+)/i) || url.match(/\/(\d{5,})(?:[/?#]|$)/));
+    const tpEventId = tpEventMatch ? tpEventMatch[1] : null;
+    const isTickPickEvent = !!tpEventId;
 
     chrome.storage.local.get(null, (data) => {
       if (chrome.runtime.lastError || !data?.games) {
-        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent, isEvenueEvent);
+        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent, isEvenueEvent, isTickPickEvent);
         return;
       }
 
@@ -187,7 +194,7 @@ function loadData() {
       const gameKeys = Object.keys(games);
 
       if (gameKeys.length === 0) {
-        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent, isEvenueEvent);
+        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent, isEvenueEvent, isTickPickEvent);
         return;
       }
 
@@ -213,6 +220,9 @@ function loadData() {
       } else if (evEventId) {
         const evKey = `evenue:${evEventId}`;
         if (games[evKey]) activeKey = evKey;
+      } else if (tpEventId) {
+        const tpKey = `tickpick:${tpEventId}`;
+        if (games[tpKey]) activeKey = tpKey;
       } else if (tabPerfId) {
         const preferred = `${tabSite}:${tabPerfId}`;
         const other = `${tabSite === "lms" ? "resale" : "lms"}:${tabPerfId}`;
@@ -223,12 +233,12 @@ function loadData() {
       if (!activeKey && tabPerfId && games[tabPerfId]) {
         activeKey = tabPerfId;
       }
-      if (!activeKey && !isTicketmasterEvent && !isSeatGeekEvent && !isStubHubEvent && !isEvenueEvent) activeKey = gameKeys[0];
+      if (!activeKey && !isTicketmasterEvent && !isSeatGeekEvent && !isStubHubEvent && !isEvenueEvent && !isTickPickEvent) activeKey = gameKeys[0];
 
       const game = activeKey ? games[activeKey] : null;
 
       if (!game || Object.keys(game.seats || {}).length === 0) {
-        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent, isEvenueEvent);
+        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent, isEvenueEvent, isTickPickEvent);
         return;
       }
 
@@ -246,7 +256,7 @@ function loadData() {
   });
 }
 
-function showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent, isEvenueEvent) {
+function showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent, isEvenueEvent, isTickPickEvent) {
   document.getElementById("noData").style.display = "block";
   document.getElementById("dashboard").style.display = "none";
   document.getElementById("liveBadge").style.display = "none";
@@ -258,6 +268,7 @@ function showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, 
     : isSeatGeekEvent ? "seatgeek"
     : isStubHubEvent ? "stubhub"
     : isEvenueEvent ? "evenue"
+    : isTickPickEvent ? "tickpick"
     : "resale"
   );
 
@@ -297,6 +308,13 @@ function showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, 
   } else if (isEvenueEvent) {
     title.textContent = "Waiting for listings…";
     hint.textContent = "Reload this Evenue event page and the seats will be captured automatically.";
+    action.style.display = "none";
+    const lmsBtn = document.getElementById("emptyActionLms");
+    if (lmsBtn) lmsBtn.style.display = "none";
+    scanningHelp.style.display = "none";
+  } else if (isTickPickEvent) {
+    title.textContent = "Waiting for listings…";
+    hint.textContent = "Reload this TickPick event page and the tickets will be captured automatically.";
     action.style.display = "none";
     const lmsBtn = document.getElementById("emptyActionLms");
     if (lmsBtn) lmsBtn.style.display = "none";
@@ -433,7 +451,7 @@ let currentSite = "resale";
 
 // Shared by the per-match site badge and the header brand below, so the two can
 // never disagree about what site the popup is showing.
-const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", resale: "Resale" };
+const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", tickpick: "TickPick", resale: "Resale" };
 
 // The header follows the active site. `lms` and `resale` are both FIFA
 // properties, so they keep the original name.
@@ -444,6 +462,7 @@ const SITE_BRANDS = {
   seatgeek: "SeatGeek Scout",
   stubhub: "StubHub Scout",
   evenue: "Evenue Scout",
+  tickpick: "TickPick Scout",
 };
 
 function setBrand(site) {
@@ -1136,8 +1155,13 @@ function compareVersions(a, b) {
 // stubhub stores `rawPrice`, which is likewise fee-inclusive (confirmed
 // against the site), so it needs no markup either.
 //
-// evenue stores SLP_PRICE, the per-seat price the site quotes, so no markup.
-const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0 };
+// evenue stores SLP_PRICE, the per-seat price the site quotes (confirmed
+// against the site), so no markup.
+//
+// tickpick stores `p`, the per-ticket price the listing quotes. TickPick
+// advertises all-in pricing so 1.0 is expected to be right, but that has not
+// been checked against a checkout page.
+const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0 };
 function centsToUSD(cents) { return cents / 1000 * (FEE_MULTIPLIER_BY_SITE[currentSite] ?? 1.15); }
 
 function formatPrice(n) {
