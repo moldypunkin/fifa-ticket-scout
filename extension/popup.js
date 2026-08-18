@@ -132,6 +132,7 @@ function siteFromUrl(url) {
     const h = new URL(url).hostname;
     if (h.includes("ticketmaster")) return "ticketmaster";
     if (h.includes("seatgeek")) return "seatgeek";
+    if (h.includes("stubhub")) return "stubhub";
     if (h.includes("-shop-")) return "lms";
     if (h.includes("-resale-")) return "resale";
   } catch {}
@@ -152,10 +153,16 @@ function loadData() {
     const sgEventMatch = isSeatGeekSite && (url.match(/\/e\/(\d+)/) || url.match(/\/(\d{5,})(?:[/?#]|$)/));
     const sgEventId = sgEventMatch ? sgEventMatch[1] : null;
     const isSeatGeekEvent = !!sgEventId;
+    // StubHub puts the id after /event/. See getStubHubEventId() in
+    // stubhub-adapter.js — same rule, kept in step deliberately.
+    const isStubHubSite = /stubhub\.com/.test(url);
+    const shEventMatch = isStubHubSite && (url.match(/\/event\/(\d+)/i) || url.match(/\/(\d{5,})(?:[/?#]|$)/));
+    const shEventId = shEventMatch ? shEventMatch[1] : null;
+    const isStubHubEvent = !!shEventId;
 
     chrome.storage.local.get(null, (data) => {
       if (chrome.runtime.lastError || !data?.games) {
-        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent);
+        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent);
         return;
       }
 
@@ -163,7 +170,7 @@ function loadData() {
       const gameKeys = Object.keys(games);
 
       if (gameKeys.length === 0) {
-        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent);
+        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent);
         return;
       }
 
@@ -183,6 +190,9 @@ function loadData() {
         // Same exactness rule as Ticketmaster above.
         const sgKey = `seatgeek:${sgEventId}`;
         if (games[sgKey]) activeKey = sgKey;
+      } else if (shEventId) {
+        const shKey = `stubhub:${shEventId}`;
+        if (games[shKey]) activeKey = shKey;
       } else if (tabPerfId) {
         const preferred = `${tabSite}:${tabPerfId}`;
         const other = `${tabSite === "lms" ? "resale" : "lms"}:${tabPerfId}`;
@@ -193,12 +203,12 @@ function loadData() {
       if (!activeKey && tabPerfId && games[tabPerfId]) {
         activeKey = tabPerfId;
       }
-      if (!activeKey && !isTicketmasterEvent && !isSeatGeekEvent) activeKey = gameKeys[0];
+      if (!activeKey && !isTicketmasterEvent && !isSeatGeekEvent && !isStubHubEvent) activeKey = gameKeys[0];
 
       const game = activeKey ? games[activeKey] : null;
 
       if (!game || Object.keys(game.seats || {}).length === 0) {
-        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent);
+        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent);
         return;
       }
 
@@ -216,14 +226,19 @@ function loadData() {
   });
 }
 
-function showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent) {
+function showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent) {
   document.getElementById("noData").style.display = "block";
   document.getElementById("dashboard").style.display = "none";
   document.getElementById("liveBadge").style.display = "none";
 
   // No game is loaded here, so brand off the tab we're sitting on rather than
   // `currentSite` — that still holds whichever site was last rendered.
-  setBrand(isTicketmasterEvent ? "ticketmaster" : isSeatGeekEvent ? "seatgeek" : "resale");
+  setBrand(
+    isTicketmasterEvent ? "ticketmaster"
+    : isSeatGeekEvent ? "seatgeek"
+    : isStubHubEvent ? "stubhub"
+    : "resale"
+  );
 
   const title = document.getElementById("emptyTitle");
   const hint = document.getElementById("emptyHint");
@@ -247,6 +262,13 @@ function showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent) 
     // with the page's own request, so there is no button to press.
     title.textContent = "Waiting for listings…";
     hint.textContent = "Reload this SeatGeek event page and the tickets will be captured automatically.";
+    action.style.display = "none";
+    const lmsBtn = document.getElementById("emptyActionLms");
+    if (lmsBtn) lmsBtn.style.display = "none";
+    scanningHelp.style.display = "none";
+  } else if (isStubHubEvent) {
+    title.textContent = "Waiting for listings…";
+    hint.textContent = "Reload this StubHub event page and the tickets will be captured automatically.";
     action.style.display = "none";
     const lmsBtn = document.getElementById("emptyActionLms");
     if (lmsBtn) lmsBtn.style.display = "none";
@@ -383,7 +405,7 @@ let currentSite = "resale";
 
 // Shared by the per-match site badge and the header brand below, so the two can
 // never disagree about what site the popup is showing.
-const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", resale: "Resale" };
+const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", resale: "Resale" };
 
 // The header follows the active site. `lms` and `resale` are both FIFA
 // properties, so they keep the original name.
@@ -392,6 +414,7 @@ const SITE_BRANDS = {
   resale: "FIFA Ticket Scout",
   ticketmaster: "Ticketmaster Scout",
   seatgeek: "SeatGeek Scout",
+  stubhub: "StubHub Scout",
 };
 
 function setBrand(site) {
@@ -1015,7 +1038,10 @@ function exportCSV() {
       `# Total Seats: ${seats.length}`,
     ];
 
-    const header = "Block,Area,Row,Seat,Category,Price_USD,Exclusive";
+    // Seat_Range carries StubHub listings whose seats could not be enumerated
+    // (e.g. 3 tickets across 13-18). Empty for every other site and for rows
+    // that do have a seat number.
+    const header = "Block,Area,Row,Seat,Seat_Range,Category,Price_USD,Exclusive";
     const rows = seats
       .sort((a, b) =>
         a.price - b.price
@@ -1025,7 +1051,7 @@ function exportCSV() {
       )
       .map((s) => {
         const area = s.area.includes(",") ? `"${s.area}"` : s.area;
-        return `${s.block},${area},${s.row},${s.seat},${s.category},${centsToUSD(s.price).toFixed(2)},${s.exclusive}`;
+        return `${s.block},${area},${s.row},${s.seat},${s.seatRange || ""},${s.category},${centsToUSD(s.price).toFixed(2)},${s.exclusive}`;
       });
 
     const csv = [...meta, "", header, ...rows].join("\n");
@@ -1075,10 +1101,12 @@ function compareVersions(a, b) {
 // Ticketmaster prices are taken from the offer as-is (all-in where the API
 // gives it), so no fee is layered on top the way FIFA resale needs.
 //
-// seatgeek is 1.0 pending a real capture: SeatGeek shows pre-fee prices by
-// default, so this likely needs a multiplier once the listings response
-// confirms whether its prices include fees.
-const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0 };
+// seatgeek stores `pf`, the listing's all-in price (base + fees, confirmed
+// against a live capture), so it needs no markup either.
+//
+// stubhub stores `rawPrice`, which is likewise fee-inclusive (confirmed
+// against the site), so it needs no markup either.
+const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0 };
 function centsToUSD(cents) { return cents / 1000 * (FEE_MULTIPLIER_BY_SITE[currentSite] ?? 1.15); }
 
 function formatPrice(n) {

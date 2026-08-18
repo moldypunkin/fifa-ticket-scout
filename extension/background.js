@@ -6,6 +6,7 @@ function siteFromUrl(url) {
     const h = new URL(url).hostname;
     if (h.includes("ticketmaster")) return "ticketmaster";
     if (h.includes("seatgeek")) return "seatgeek";
+    if (h.includes("stubhub")) return "stubhub";
     if (h.includes("-resale-")) return "resale";
     if (h.includes("-shop-"))   return "lms";
   } catch {}
@@ -543,6 +544,19 @@ async function processApiResponse(url, body, tabId, eventInfo) {
     }
   }
 
+  // StubHub listings — captured passively. The response comes back on the
+  // event page's own path with a query string, so the body shape is what
+  // identifies it, not the url.
+  if (site === "stubhub" && Array.isArray(body.items) && body.items.length) {
+    const eventId = extractParam(url, "eventId")
+      || (url.match(/\/event\/(\d+)/i) || [])[1]
+      || String(body.items[0].eventId || "");
+    if (eventId) {
+      await enforceGameLimit(`${site}:${eventId}`);
+      await saveStubHubSeats(eventId, body, tabId, site, eventInfo);
+    }
+  }
+
   // SeatGeek listings — captured passively from the page's own request.
   if (site === "seatgeek" && url.includes("/api/event_listings_v2") && Array.isArray(body.listings)) {
     // The event id is the `id` query param; fall back to the `e` field the
@@ -852,6 +866,145 @@ async function saveSeatGeekSeats(eventId, body, tabId, site, eventInfo) {
 
   const total = Object.keys(seats).length;
   console.log(`[background] SeatGeek: ${total} seats from ${body.listings.length} listings` +
+    (missingPrice ? `, ${missingPrice} had no price` : "") +
+    (seatless ? `, ${seatless} had no seat numbers` : ""));
+
+  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].site = site;
+  games[gameKey].lastScanned = Date.now();
+
+  if (tabId) tabGameMap[tabId] = gameKey;
+  await chrome.storage.local.set({ games });
+}
+
+// ─── StubHub listings ─────────────────────────────────────────────────────
+// One entry per listing under `items`. Confirmed against a live capture of
+// event 160425133:
+//
+//   section        "319"      block
+//   row            "14"       row
+//   seatFrom/To    "13"/"13"  seat range (inclusive); `seat` is "13_13"
+//   availableTickets 1        how many tickets the listing holds
+//   rawPrice       152.16     numeric per-ticket price
+//   price          "$152"     rawPrice floored, display only
+//   formattedTotalPrice "$153" rawPrice ceiled, display only
+//   ticketClassName "Upper"   zone label
+//
+// `rawPrice` is the only numeric price, so it is what we store. It is
+// fee-inclusive (confirmed against the site 2026-08-18), which is why
+// FEE_MULTIPLIER_BY_SITE leaves stubhub at 1.0 — the empty `formattedFees`
+// on the captured listing is not evidence of missing fees.
+function stubHubPrice(item) {
+  const candidates = [item.rawPrice, item.faceValue];
+  for (const c of candidates) {
+    const n = typeof c === "string" ? parseFloat(c) : c;
+    if (typeof n === "number" && isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+// Seat numbering is only trustworthy when the range agrees with the ticket
+// count. Three real cases, confirmed against live listings:
+//
+//   13..16, 4 tickets  -> contiguous:      13,14,15,16
+//   13..17, 3 tickets  -> odd/even seats:  13,15,17   (step 2)
+//   13..18, 3 tickets  -> neither fits; do NOT invent numbers. Keep the seats
+//                         blank and carry "13-18" through as a range instead.
+//
+// Many StubHub listings expose no seat numbers at all, which is normal and
+// also lands in the blank case.
+function stubHubSeatNumbers(item) {
+  const count = Number(item.availableTickets) || 1;
+  const from = parseInt(item.seatFrom, 10);
+  const to = parseInt(item.seatTo, 10);
+  const blanks = Array.from({ length: count }, () => "");
+
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) return blanks;
+
+  const span = to - from;
+  if (span + 1 === count) {
+    const out = [];
+    for (let n = from; n <= to; n++) out.push(String(n));
+    return out;
+  }
+  // Odd/even seating: same side of the aisle, every other seat.
+  if (count > 1 && span === 2 * (count - 1)) {
+    const out = [];
+    for (let n = from; n <= to; n += 2) out.push(String(n));
+    return out;
+  }
+  return blanks;
+}
+
+// "13-18" when the seats could not be enumerated, so the range still reaches
+// the dashboard and the CSV instead of being dropped.
+function stubHubSeatRange(item) {
+  const from = parseInt(item.seatFrom, 10);
+  const to = parseInt(item.seatTo, 10);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) return "";
+  return from === to ? String(from) : `${from}-${to}`;
+}
+
+async function saveStubHubSeats(eventId, body, tabId, site, eventInfo) {
+  if (!body || !Array.isArray(body.items)) return;
+
+  const gameKey = `${site}:${eventId}`;
+  const data = await getStorage();
+  const games = data.games || {};
+
+  if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  if (eventInfo && eventInfo.name) {
+    games[gameKey].match = {
+      name: eventInfo.name,
+      date: eventInfo.date || null,
+      venue: eventInfo.venue || null,
+      currency: (body.items[0] && body.items[0].buyerCurrencyCode) || "USD",
+      performanceId: eventId,
+    };
+  }
+
+  const seats = {};
+  let missingPrice = 0;
+  let seatless = 0;
+
+  try {
+    for (const item of body.items) {
+      const dollars = stubHubPrice(item);
+      if (dollars == null) { missingPrice++; continue; }
+      // Stored in thousandths to match centsToUSD() in the popup.
+      const price = Math.round(dollars * 1000);
+
+      const block = String(item.section != null ? item.section : item.sectionMapName || "");
+      const row = String(item.row != null ? item.row : "");
+      const nums = stubHubSeatNumbers(item);
+      const range = stubHubSeatRange(item);
+      if (!nums[0]) seatless++;
+
+      nums.forEach((seatNo, i) => {
+        const key = `${item.listingId || item.id || `${block}-${row}`}-${seatNo || i}`;
+        seats[key] = {
+          block,
+          row,
+          seat: String(seatNo),
+          // Only meaningful when `seat` is blank; harmless duplication when not.
+          seatRange: seatNo ? "" : range,
+          area: item.ticketClassName || "",
+          category: "resale",
+          price,
+          exclusive: true,
+          site: "stubhub",
+          accessible: false,
+          attributes: [],
+        };
+      });
+    }
+  } catch (error) {
+    console.log("[background] Error parsing StubHub listings:", error.message);
+  }
+
+  const total = Object.keys(seats).length;
+  console.log(`[background] StubHub: ${total} seats from ${body.items.length} listings` +
     (missingPrice ? `, ${missingPrice} had no price` : "") +
     (seatless ? `, ${seatless} had no seat numbers` : ""));
 

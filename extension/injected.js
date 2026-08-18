@@ -9,13 +9,16 @@
   const isTicketmaster = window.location.hostname.includes('ticketmaster.com');
   const isFifa = window.location.hostname.includes('tickets.fifa.com');
   const isSeatGeek = window.location.hostname.includes('seatgeek.com');
+  const isStubHub = window.location.hostname.includes('stubhub.com');
 
   if (isTicketmaster) {
     console.log("[FIFA Ticket Scout] Running on Ticketmaster (will use adapter)");
   } else if (isFifa) {
     console.log("[FIFA Ticket Scout] Running on FIFA (using FIFA logic)");
   } else if (isSeatGeek) {
-    console.log("[FIFA Ticket Scout] Running on SeatGeek (endpoint discovery mode)");
+    console.log("[FIFA Ticket Scout] Running on SeatGeek (passive capture)");
+  } else if (isStubHub) {
+    console.log("[FIFA Ticket Scout] Running on StubHub (endpoint discovery mode)");
   } else {
     console.log("[FIFA Ticket Scout] Unknown ticketing site - no action");
     return;
@@ -28,11 +31,16 @@
   // That keeps us clear of `scrape_uuid`, the Talos anti-tamper layer and
   // DataDome, and avoids having to forge per-session ids like
   // `event_page_view_id` / `sixpack_client_id`.
+  // StubHub returns its listings on the event page's OWN path with a query
+  // string, so the pattern is the path segment; background.js confirms the
+  // body actually carries `items` before parsing.
   const MATCH_PATTERNS = isTicketmaster
     ? []
     : isSeatGeek
       ? ["/api/event_listings_v2"]
-      : ["/seatmap/", "/performance/"];
+      : isStubHub
+        ? ["/event/"]
+        : ["/seatmap/", "/performance/"];
 
   // Defense-in-depth: prevent duplicate scans at the page level.
   // injected.js lives as long as the page — survives SW restarts.
@@ -44,8 +52,165 @@
   function shouldCapture(url) {
     // For Ticketmaster, never auto-capture page requests
     if (isTicketmaster) return false;
-    // FIFA and SeatGeek both match on their own patterns.
+    // FIFA, SeatGeek and StubHub all match on their own patterns.
     return MATCH_PATTERNS.some((p) => url.includes(p));
+  }
+
+  // ─── Endpoint discovery (TEMPORARY, per new site) ────────────────────────
+  // Reports any JSON response big enough to be an inventory payload, from
+  // document_start — earlier than a console paste can hook, which is the only
+  // reason SeatGeek's endpoint was findable at all.
+  //
+  // Remove the DISCOVERY_SITE flag once the site's payload is parsed.
+  // Set to a short site tag ("SH", "SG", …) to hunt a new site's inventory
+  // endpoint; null in normal operation. Both supported sites are parsed now.
+  const DISCOVERY_SITE = null;
+  const PROBE_MIN_CHARS = 2000;
+  const PROBE_SKIP = /google|doubleclick|datadog|forter|riskified|openai|reddit|yimg|adsrvr|boomtrain|iteratehq|datadome|newrelic|segment|branch\.io|qualtrics|vggcdn|cloudfront|akamai|\.geojson|map-sprites|svgnew|sprite|mapbox|\.png|\.jpg|\.svg|\.woff|\.pbf|\.css|field_images|\/glyphs\//i;
+  // path -> largest payload already reported for it. StubHub reuses ONE path
+  // for both the full inventory and small filtered queries (the query string
+  // carries sections/rows/quantity), so deduping on the bare path hides the
+  // big response behind whichever small one happened to fire first.
+  const probeBest = new Map();
+
+  // Silence is ambiguous — it can mean "no request happened" or "the probe
+  // threw and the caller's .catch swallowed it". Count every outcome and
+  // report once, so a quiet run still says why.
+  const probeStats = { seen: 0, small: 0, skipped: 0, nonJson: 0, dup: 0, reported: 0, errors: 0 };
+  let probeSummaryTimer = null;
+
+  function probeSummary() {
+    const t = `[${DISCOVERY_SITE}-PROBE]`;
+    console.log(`${t} summary: ${probeStats.seen} responses seen, ${probeStats.reported} reported ` +
+      `(skipped: ${probeStats.small} too small, ${probeStats.skipped} filtered, ` +
+      `${probeStats.nonJson} not JSON, ${probeStats.dup} duplicate, ${probeStats.errors} errored)`);
+    if (probeStats.seen === 0) {
+      console.log(`${t} no responses reached the probe at all — the page may be serving from cache; try a hard reload`);
+    }
+  }
+
+  function probeResponse(url, text) {
+    if (!DISCOVERY_SITE || !url || typeof text !== "string") return;
+    probeStats.seen++;
+    if (!probeSummaryTimer) probeSummaryTimer = setTimeout(probeSummary, 12000);
+    try {
+      probeResponseInner(url, text);
+    } catch (e) {
+      probeStats.errors++;
+      // Never silent: the fetch hook's .catch would otherwise hide this.
+      console.log(`[${DISCOVERY_SITE}-PROBE] ERROR on ${String(url).slice(0, 120)}: ${e && e.message}`);
+    }
+  }
+
+  function probeResponseInner(url, text) {
+    if (text.length < PROBE_MIN_CHARS) { probeStats.small++; return; }
+    if (PROBE_SKIP.test(url)) { probeStats.skipped++; return; }
+
+    const head = text.slice(0, 200).trim();
+    if (!head.startsWith("{") && !head.startsWith("[")) { probeStats.nonJson++; return; }
+
+    // One line per endpoint, not per call — these pages refetch on filtering.
+    // But re-report when a substantially larger payload arrives on the same
+    // path: that is the full inventory arriving after a filtered query.
+    const key = String(url).split("?")[0];
+    const prev = probeBest.get(key) || 0;
+    if (prev && text.length < prev * 2) { probeStats.dup++; return; }
+    probeBest.set(key, Math.max(prev, text.length));
+    probeStats.reported++;
+    if (prev) {
+      console.log(`[${DISCOVERY_SITE}-PROBE] (same path, ` +
+        `${(text.length / 1024).toFixed(1)}kB vs ${(prev / 1024).toFixed(1)}kB before — larger, reporting)`);
+    }
+
+    const tag = `[${DISCOVERY_SITE}-PROBE]`;
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch (e) {}
+
+    const shape = !parsed ? "(unparsed)"
+      : Array.isArray(parsed)
+        ? `array[${parsed.length}] of ${Object.keys(parsed[0] || {}).slice(0, 12).join(",")}`
+        : Object.keys(parsed).slice(0, 18).join(",");
+
+    const abs = toAbsoluteUrl(url);
+    console.log(`${tag} ${(text.length / 1024).toFixed(1)}kB ${abs.split("?")[0]}`);
+    const query = abs.split("?")[1];
+    // Chopped into chunks the console will not elide mid-line.
+    if (query) {
+      for (let i = 0; i < query.length; i += 160) {
+        console.log(`${tag}   q[${i}]: ${query.slice(i, i + 160)}`);
+      }
+    }
+    console.log(`${tag}   keys: ${shape.slice(0, 300)}`);
+
+    // Only dump structure for payloads that actually look like inventory.
+    // Seat-map geometry is far bigger than the listings themselves (StubHub
+    // ships a 2MB GeoJSON), and dumping it floods the 1000-line log buffer
+    // and evicts the payload we are hunting for.
+    if (parsed && looksLikeInventory(text)) dumpShape(parsed, tag);
+    else if (parsed && text.length > 20000) {
+      console.log(`${tag}   (large, but not inventory-shaped — not dumping)`);
+    }
+  }
+
+  // Cheap text test: a listings payload names both money and seat location.
+  // Runs on the raw string so it does not care how the object is nested.
+  function looksLikeInventory(text) {
+    const sample = text.length > 400000 ? text.slice(0, 400000) : text;
+    const money = /"[a-z_]*(price|amount|cost|fee)[a-z_]*"\s*:/i.test(sample);
+    const place = /"[a-z_]*(section|row|seat|quantity|qty)[a-z_]*"\s*:/i.test(sample);
+    return money && place;
+  }
+
+  function dumpShape(parsed, tag) {
+    const arrays = [];
+    (function walk(node, path, depth) {
+      if (!node || typeof node !== "object" || depth > 6) return;
+      if (Array.isArray(node)) {
+        const first = node.find((v) => v && typeof v === "object");
+        arrays.push({
+          path: path || "(root)",
+          count: node.length,
+          keys: first ? Object.keys(first) : [],
+          sample: first || null,
+        });
+        if (first) walk(first, `${path}[0]`, depth + 1);
+        return;
+      }
+      for (const k of Object.keys(node)) walk(node[k], path ? `${path}.${k}` : k, depth + 1);
+    })(parsed, "", 0);
+
+    arrays.sort((a, b) => b.count - a.count);
+    console.log(`${tag}   --- ${arrays.length} arrays, largest first ---`);
+    for (const a of arrays.slice(0, 10)) {
+      console.log(`${tag}   ${a.count} @ ${a.path} :: ${a.keys.slice(0, 22).join(",")}`);
+    }
+
+    // The inventory array is not always the biggest — StubHub's `items` (the
+    // listings) is smaller than `sellerListingNotes`. Score on element key
+    // names instead and sample the best match.
+    const score = (a) => {
+      const k = a.keys.join(",").toLowerCase();
+      let n = 0;
+      if (/section/.test(k)) n += 2;
+      if (/row|row[A-Z_]|rowid/i.test(a.keys.join(" "))) n += 2;
+      if (/seat/.test(k)) n += 1;
+      if (/price|amount|fee|cost/.test(k)) n += 3;
+      if (/quantity|qty|availabletickets/.test(k)) n += 2;
+      return n;
+    };
+    const ranked = arrays.filter((a) => a.sample).sort((a, b) => score(b) - score(a) || b.count - a.count);
+    const best = ranked[0];
+    if (best && score(best) > 0) {
+      console.log(`${tag}   BEST inventory candidate: ${best.path} (${best.count} items, score ${score(best)})`);
+      // Full key list — the earlier 22-key cut hid the price fields.
+      console.log(`${tag}   ALL KEYS: ${best.keys.join(",")}`);
+      const json = JSON.stringify(best.sample);
+      for (let i = 0; i < Math.min(json.length, 3000); i += 500) {
+        console.log(`${tag}   s[${i}]: ${json.slice(i, i + 500)}`);
+      }
+    } else {
+      console.log(`${tag}   (no inventory-shaped array found)`);
+    }
   }
 
   // Pages may call fetch/XHR with a relative URL — SeatGeek requests
@@ -61,15 +226,16 @@
     }
   }
 
-  // SeatGeek's inventory response carries no event name/date, so attach what
-  // the adapter reads off the page. Undefined elsewhere: the FIFA paths get
-  // match info from their own API, and Ticketmaster attaches it at scan time.
-  function seatGeekEventInfo() {
-    if (!isSeatGeek) return undefined;
+  // SeatGeek and StubHub inventory responses carry no event name/date, so
+  // attach what the adapter reads off the page. Undefined elsewhere: the FIFA
+  // paths get match info from their own API, and Ticketmaster attaches it at
+  // scan time.
+  function pageEventInfo() {
     try {
-      return window.__seatgeekAdapter
-        ? window.__seatgeekAdapter.getEventInfo()
-        : undefined;
+      const adapter = isSeatGeek ? window.__seatgeekAdapter
+        : isStubHub ? window.__stubhubAdapter
+        : null;
+      return adapter ? adapter.getEventInfo() : undefined;
     } catch (e) {
       return undefined;
     }
@@ -90,7 +256,7 @@
   //      chatty enough to blow out the buffer in seconds.
   //   2. Guard re-entrancy. Our postMessage is observed by the listener below,
   //      and anything that logs while handling a message would loop forever.
-  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[TM]", "[SG]", "[SG-PROBE]"];
+  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[TM]", "[SG]", "[SH]", "[SH-PROBE]"];
   const originalLog = console.log;
   let relayingLog = false;
   console.log = function (...args) {
@@ -135,12 +301,19 @@
 
     const response = await originalFetch.apply(this, args);
 
+    if (DISCOVERY_SITE) {
+      // Read off a clone so the page's own consumer is untouched.
+      response.clone().text().then((t) => probeResponse(url, t)).catch((e) => {
+        console.log(`[${DISCOVERY_SITE}-PROBE] could not read ${String(url).slice(0, 100)}: ${e && e.message}`);
+      });
+    }
+
     if (shouldCapture(url)) {
       try {
         const clone = response.clone();
         const body = await clone.json();
         window.postMessage(
-          { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(url), body, eventInfo: seatGeekEventInfo() },
+          { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(url), body, eventInfo: pageEventInfo() },
           "*"
         );
       } catch {
@@ -170,6 +343,23 @@
   };
 
   XMLHttpRequest.prototype.send = function (...args) {
+    if (DISCOVERY_SITE && this._ftsUrl) {
+      this.addEventListener("load", function () {
+        let body = null;
+        try {
+          // Reading .responseText throws when responseType is json/blob/etc.
+          body = this.responseText;
+        } catch (e) {
+          try {
+            body = typeof this.response === "string"
+              ? this.response
+              : JSON.stringify(this.response);
+          } catch (e2) { body = null; }
+        }
+        if (typeof body === "string") probeResponse(this._ftsUrl, body);
+      });
+    }
+
     if (this._ftsUrl && shouldCapture(this._ftsUrl)) {
       // Capture headers from real XHR requests
       if (!capturedHeaders && this._ftsHeaders && Object.keys(this._ftsHeaders).length > 0) {
@@ -181,7 +371,7 @@
         try {
           const body = JSON.parse(this.responseText);
           window.postMessage(
-            { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(this._ftsUrl), body, eventInfo: seatGeekEventInfo() },
+            { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(this._ftsUrl), body, eventInfo: pageEventInfo() },
             "*"
           );
         } catch {
