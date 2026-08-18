@@ -10,6 +10,7 @@
   const isFifa = window.location.hostname.includes('tickets.fifa.com');
   const isSeatGeek = window.location.hostname.includes('seatgeek.com');
   const isStubHub = window.location.hostname.includes('stubhub.com');
+  const isEvenue = window.location.hostname.includes('evenue.net');
 
   if (isTicketmaster) {
     console.log("[FIFA Ticket Scout] Running on Ticketmaster (will use adapter)");
@@ -18,7 +19,9 @@
   } else if (isSeatGeek) {
     console.log("[FIFA Ticket Scout] Running on SeatGeek (passive capture)");
   } else if (isStubHub) {
-    console.log("[FIFA Ticket Scout] Running on StubHub (endpoint discovery mode)");
+    console.log("[FIFA Ticket Scout] Running on StubHub (passive capture)");
+  } else if (isEvenue) {
+    console.log("[FIFA Ticket Scout] Running on Evenue (endpoint discovery mode)");
   } else {
     console.log("[FIFA Ticket Scout] Unknown ticketing site - no action");
     return;
@@ -40,7 +43,9 @@
       ? ["/api/event_listings_v2"]
       : isStubHub
         ? ["/event/"]
-        : ["/seatmap/", "/performance/"];
+        : isEvenue
+          ? ["/pac-api/seat-availability/"]
+          : ["/seatmap/", "/performance/"];
 
   // Defense-in-depth: prevent duplicate scans at the page level.
   // injected.js lives as long as the page — survives SW restarts.
@@ -52,7 +57,7 @@
   function shouldCapture(url) {
     // For Ticketmaster, never auto-capture page requests
     if (isTicketmaster) return false;
-    // FIFA, SeatGeek and StubHub all match on their own patterns.
+    // FIFA, SeatGeek, StubHub and Evenue all match on their own patterns.
     return MATCH_PATTERNS.some((p) => url.includes(p));
   }
 
@@ -61,9 +66,8 @@
   // document_start — earlier than a console paste can hook, which is the only
   // reason SeatGeek's endpoint was findable at all.
   //
-  // Remove the DISCOVERY_SITE flag once the site's payload is parsed.
-  // Set to a short site tag ("SH", "SG", …) to hunt a new site's inventory
-  // endpoint; null in normal operation. Both supported sites are parsed now.
+  // Set to a short site tag ("EV", "SH", "SG", …) to hunt a new site's
+  // inventory endpoint; null once that site is parsed.
   const DISCOVERY_SITE = null;
   const PROBE_MIN_CHARS = 2000;
   const PROBE_SKIP = /google|doubleclick|datadog|forter|riskified|openai|reddit|yimg|adsrvr|boomtrain|iteratehq|datadome|newrelic|segment|branch\.io|qualtrics|vggcdn|cloudfront|akamai|\.geojson|map-sprites|svgnew|sprite|mapbox|\.png|\.jpg|\.svg|\.woff|\.pbf|\.css|field_images|\/glyphs\//i;
@@ -76,14 +80,15 @@
   // Silence is ambiguous — it can mean "no request happened" or "the probe
   // threw and the caller's .catch swallowed it". Count every outcome and
   // report once, so a quiet run still says why.
-  const probeStats = { seen: 0, small: 0, skipped: 0, nonJson: 0, dup: 0, reported: 0, errors: 0 };
+  const probeStats = { seen: 0, small: 0, skipped: 0, nonJson: 0, dup: 0, reported: 0, errors: 0, htmlReported: 0 };
   let probeSummaryTimer = null;
 
   function probeSummary() {
     const t = `[${DISCOVERY_SITE}-PROBE]`;
     console.log(`${t} summary: ${probeStats.seen} responses seen, ${probeStats.reported} reported ` +
       `(skipped: ${probeStats.small} too small, ${probeStats.skipped} filtered, ` +
-      `${probeStats.nonJson} not JSON, ${probeStats.dup} duplicate, ${probeStats.errors} errored)`);
+      `${probeStats.nonJson} not JSON, ${probeStats.dup} duplicate, ${probeStats.errors} errored)` +
+      (probeStats.htmlReported ? ` [${probeStats.htmlReported} large non-JSON named above]` : ""));
     if (probeStats.seen === 0) {
       console.log(`${t} no responses reached the probe at all — the page may be serving from cache; try a hard reload`);
     }
@@ -107,7 +112,25 @@
     if (PROBE_SKIP.test(url)) { probeStats.skipped++; return; }
 
     const head = text.slice(0, 200).trim();
-    if (!head.startsWith("{") && !head.startsWith("[")) { probeStats.nonJson++; return; }
+    if (!head.startsWith("{") && !head.startsWith("[")) {
+      probeStats.nonJson++;
+      // Evenue (Paciolan) is server-rendered, so its inventory may well be
+      // HTML. Name the biggest few so a non-JSON payload is not invisible.
+      if (text.length > 20000 && probeStats.htmlReported < 5) {
+        probeStats.htmlReported++;
+        const key = String(url).split("?")[0];
+        if (!probeBest.has("html:" + key)) {
+          probeBest.set("html:" + key, text.length);
+          console.log(`[${DISCOVERY_SITE}-PROBE] non-JSON ${(text.length / 1024).toFixed(1)}kB ${toAbsoluteUrl(url)}`);
+          console.log(`[${DISCOVERY_SITE}-PROBE]   starts: ${head.slice(0, 120).replace(/\s+/g, " ")}`);
+          // Tables are how a CGI site lists tickets.
+          const tables = (text.match(/<table/gi) || []).length;
+          const rows = (text.match(/<tr[\s>]/gi) || []).length;
+          console.log(`[${DISCOVERY_SITE}-PROBE]   html: ${tables} tables, ${rows} rows`);
+        }
+      }
+      return;
+    }
 
     // One line per endpoint, not per call — these pages refetch on filtering.
     // But re-report when a substantially larger payload arrives on the same
@@ -142,23 +165,13 @@
     }
     console.log(`${tag}   keys: ${shape.slice(0, 300)}`);
 
-    // Only dump structure for payloads that actually look like inventory.
-    // Seat-map geometry is far bigger than the listings themselves (StubHub
-    // ships a 2MB GeoJSON), and dumping it floods the 1000-line log buffer
-    // and evicts the payload we are hunting for.
-    if (parsed && looksLikeInventory(text)) dumpShape(parsed, tag);
-    else if (parsed && text.length > 20000) {
-      console.log(`${tag}   (large, but not inventory-shaped — not dumping)`);
-    }
-  }
-
-  // Cheap text test: a listings payload names both money and seat location.
-  // Runs on the raw string so it does not care how the object is nested.
-  function looksLikeInventory(text) {
-    const sample = text.length > 400000 ? text.slice(0, 400000) : text;
-    const money = /"[a-z_]*(price|amount|cost|fee)[a-z_]*"\s*:/i.test(sample);
-    const place = /"[a-z_]*(section|row|seat|quantity|qty)[a-z_]*"\s*:/i.test(sample);
-    return money && place;
+    // Dump every parsed JSON payload. An earlier version gated this on
+    // key names looking like inventory, which silently skipped Evenue's
+    // 2.3MB seat-availability response — it encodes seats POSITIONALLY
+    // (arrays of arrays), so no "price"/"section" key ever appears.
+    // PROBE_SKIP, the size floor and the dedupe keep the volume sane, and
+    // dumpShape caps its own output.
+    if (parsed) dumpShape(parsed, tag);
   }
 
   function dumpShape(parsed, tag) {
@@ -172,6 +185,7 @@
           count: node.length,
           keys: first ? Object.keys(first) : [],
           sample: first || null,
+          parent: node,
         });
         if (first) walk(first, `${path}[0]`, depth + 1);
         return;
@@ -199,17 +213,36 @@
       return n;
     };
     const ranked = arrays.filter((a) => a.sample).sort((a, b) => score(b) - score(a) || b.count - a.count);
-    const best = ranked[0];
-    if (best && score(best) > 0) {
-      console.log(`${tag}   BEST inventory candidate: ${best.path} (${best.count} items, score ${score(best)})`);
-      // Full key list — the earlier 22-key cut hid the price fields.
-      console.log(`${tag}   ALL KEYS: ${best.keys.join(",")}`);
-      const json = JSON.stringify(best.sample);
-      for (let i = 0; i < Math.min(json.length, 3000); i += 500) {
-        console.log(`${tag}   s[${i}]: ${json.slice(i, i + 500)}`);
+
+    // Sample the top few arrays. Scoring alone is not enough: Evenue encodes
+    // seats POSITIONALLY, so its 49k-row array has keys "0","1","2"… and
+    // always scores 0. Print samples regardless, largest first, or the one
+    // payload we actually want stays invisible.
+    const picks = ranked.slice(0, 3);
+    if (!picks.length) {
+      console.log(`${tag}   (no arrays with sampleable elements)`);
+      return;
+    }
+
+    for (const pick of picks) {
+      const scored = score(pick);
+      console.log(`${tag}   CANDIDATE ${pick.path} (${pick.count} items, score ${scored})`);
+      if (pick.keys.length) console.log(`${tag}   ALL KEYS: ${pick.keys.join(",").slice(0, 600)}`);
+
+      // A positional row tells you nothing on its own — you need several to
+      // infer what each column means. Print three.
+      if (Array.isArray(pick.sample)) {
+        console.log(`${tag}   POSITIONAL, ${pick.sample.length} columns; first 3 rows:`);
+        const parent = pick.parent || [];
+        for (let r = 0; r < Math.min(3, parent.length); r++) {
+          console.log(`${tag}   r${r}: ${JSON.stringify(parent[r]).slice(0, 400)}`);
+        }
+      } else {
+        const json = JSON.stringify(pick.sample);
+        for (let i = 0; i < Math.min(json.length, 1500); i += 500) {
+          console.log(`${tag}   s[${i}]: ${json.slice(i, i + 500)}`);
+        }
       }
-    } else {
-      console.log(`${tag}   (no inventory-shaped array found)`);
     }
   }
 
@@ -234,6 +267,7 @@
     try {
       const adapter = isSeatGeek ? window.__seatgeekAdapter
         : isStubHub ? window.__stubhubAdapter
+        : isEvenue ? window.__evenueAdapter
         : null;
       return adapter ? adapter.getEventInfo() : undefined;
     } catch (e) {
@@ -256,7 +290,7 @@
   //      chatty enough to blow out the buffer in seconds.
   //   2. Guard re-entrancy. Our postMessage is observed by the listener below,
   //      and anything that logs while handling a message would loop forever.
-  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[TM]", "[SG]", "[SH]", "[SH-PROBE]"];
+  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[TM]", "[SG]", "[SH]", "[EV]", "[EV-PROBE]", "[SH-PROBE]"];
   const originalLog = console.log;
   let relayingLog = false;
   console.log = function (...args) {

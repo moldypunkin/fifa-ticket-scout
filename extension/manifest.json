@@ -15,6 +15,7 @@
     "https://services.ticketmaster.com/*",
     "*://*.seatgeek.com/*",
     "*://*.stubhub.com/*",
+    "*://*.evenue.net/*",
     "https://api.gumroad.com/*",
     "https://yaydpahqlqwesqdddgfi.supabase.co/*",
     "https://raw.githubusercontent.com/*"
@@ -64,6 +65,17 @@
     },
     {
       "matches": ["*://*.stubhub.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["*://*.evenue.net/*"],
+      "js": ["event-info.js", "evenue-adapter.js", "injected.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://*.evenue.net/*"],
       "js": ["content.js"],
       "run_at": "document_start"
     }

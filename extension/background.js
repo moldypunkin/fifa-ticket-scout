@@ -7,6 +7,7 @@ function siteFromUrl(url) {
     if (h.includes("ticketmaster")) return "ticketmaster";
     if (h.includes("seatgeek")) return "seatgeek";
     if (h.includes("stubhub")) return "stubhub";
+    if (h.includes("evenue")) return "evenue";
     if (h.includes("-resale-")) return "resale";
     if (h.includes("-shop-"))   return "lms";
   } catch {}
@@ -544,6 +545,17 @@ async function processApiResponse(url, body, tabId, eventInfo) {
     }
   }
 
+  // Evenue seat availability — captured passively.
+  if (site === "evenue" && url.includes("/pac-api/seat-availability/") && Array.isArray(body)) {
+    const m = url.match(/event-id\/([^/?]+)/);
+    // "977:F26:02" -> "F26:02"; the leading segment is the venue/distributor.
+    const eventId = m ? decodeURIComponent(m[1]).split(":").slice(-2).join(":") : "";
+    if (eventId) {
+      await enforceGameLimit(`${site}:${eventId}`);
+      await saveEvenueSeats(eventId, body, tabId, site, eventInfo);
+    }
+  }
+
   // StubHub listings — captured passively. The response comes back on the
   // event page's own path with a query string, so the body shape is what
   // identifies it, not the url.
@@ -1007,6 +1019,128 @@ async function saveStubHubSeats(eventId, body, tabId, site, eventInfo) {
   console.log(`[background] StubHub: ${total} seats from ${body.items.length} listings` +
     (missingPrice ? `, ${missingPrice} had no price` : "") +
     (seatless ? `, ${seatless} had no seat numbers` : ""));
+
+  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].site = site;
+  games[gameKey].lastScanned = Date.now();
+
+  if (tabId) tabGameMap[tabId] = gameKey;
+  await chrome.storage.local.set({ games });
+}
+
+// ─── Evenue seat availability ─────────────────────────────────────────────
+// The payload is [rows, headerNames] — 49,233 rows for KU event F26:02, each
+// a positional array described by the trailing header row:
+//
+//   LEVELSECTIONCD  "KU:101"  section, prefixed by level
+//   ROWCD           "10"      row
+//   SEATCD          "1"       seat
+//   PRICELEVELCD    "4"       price tier
+//   SEATSTATUS      "O"/"%"   O = open; other codes are holds/sold
+//   SLP_PRICE       32039     price in CENTS -> $320.39
+//   AVAILABLE       0/1       the authoritative flag
+//   HIDDEN          0/1
+//
+// Columns are located BY NAME from the header row rather than by index, so a
+// reordering upstream cannot silently shift prices into the wrong field.
+function evenueColumnIndex(headers) {
+  const idx = {};
+  if (!Array.isArray(headers)) return idx;
+  headers.forEach((h, i) => {
+    if (typeof h === "string") idx[h.trim().toUpperCase()] = i;
+  });
+  return idx;
+}
+
+// Evenue ships the header row alongside the data, but which element it is has
+// not been guaranteed, so identify it by content rather than position.
+function evenueSplitPayload(body) {
+  if (!Array.isArray(body)) return { rows: null, headers: null };
+  const isHeader = (a) => Array.isArray(a) && a.length
+    && a.every((v) => typeof v === "string")
+    && a.some((v) => /^(SEATCD|ROWCD|LEVELSECTIONCD|SLP_PRICE|AVAILABLE)$/i.test(v));
+  const headers = body.find(isHeader) || null;
+  const rows = body.find((a) => Array.isArray(a) && a.length && Array.isArray(a[0])) || null;
+  return { rows, headers };
+}
+
+async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
+  const split = evenueSplitPayload(body);
+  const rows = split.rows;
+  const headers = split.headers;
+  if (!rows || !headers) {
+    console.log("[background] Evenue: payload missing rows or header row — not parsing");
+    return;
+  }
+
+  const idx = evenueColumnIndex(headers);
+  for (const required of ["LEVELSECTIONCD", "ROWCD", "SEATCD", "SLP_PRICE", "AVAILABLE"]) {
+    if (idx[required] === undefined) {
+      console.log(`[background] Evenue: header row has no ${required} — not parsing`);
+      return;
+    }
+  }
+
+  const gameKey = `${site}:${eventId}`;
+  const data = await getStorage();
+  const games = data.games || {};
+  if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  if (eventInfo && eventInfo.name) {
+    games[gameKey].match = {
+      name: eventInfo.name,
+      date: eventInfo.date || null,
+      venue: eventInfo.venue || null,
+      currency: "USD",
+      performanceId: eventId,
+    };
+  }
+
+  const seats = {};
+  let unavailable = 0;
+  let missingPrice = 0;
+
+  try {
+    for (const row of rows) {
+      if (!Array.isArray(row)) continue;
+
+      // AVAILABLE is the authoritative flag; SEATSTATUS "O" agrees with it but
+      // also carries hold codes we do not need to enumerate.
+      if (Number(row[idx.AVAILABLE]) !== 1) { unavailable++; continue; }
+      if (idx.HIDDEN !== undefined && Number(row[idx.HIDDEN]) === 1) { unavailable++; continue; }
+
+      const cents = Number(row[idx.SLP_PRICE]);
+      if (!isFinite(cents) || cents <= 0) { missingPrice++; continue; }
+      // SLP_PRICE is cents; storage is thousandths of a dollar.
+      const price = Math.round((cents / 100) * 1000);
+
+      // "KU:101" -> "101". The prefix is the level, repeated on every row.
+      const rawSection = String(row[idx.LEVELSECTIONCD] || "");
+      const block = rawSection.includes(":") ? rawSection.split(":").pop() : rawSection;
+      const rowCd = String(row[idx.ROWCD] || "");
+      const seatCd = String(row[idx.SEATCD] || "");
+
+      seats[`${block}-${rowCd}-${seatCd}`] = {
+        block,
+        row: rowCd,
+        seat: seatCd,
+        area: idx.PRICELEVELCD !== undefined ? `Price level ${row[idx.PRICELEVELCD]}` : "",
+        category: "primary",
+        price,
+        exclusive: true,
+        site: "evenue",
+        accessible: false,
+        attributes: [],
+      };
+    }
+  } catch (error) {
+    console.log("[background] Error parsing Evenue seats:", error.message);
+  }
+
+  const total = Object.keys(seats).length;
+  console.log(`[background] Evenue: ${total} available seats from ${rows.length} rows` +
+    (unavailable ? `, ${unavailable} unavailable/hidden` : "") +
+    (missingPrice ? `, ${missingPrice} had no price` : ""));
 
   games[gameKey].seats = { ...games[gameKey].seats, ...seats };
   games[gameKey].site = site;
