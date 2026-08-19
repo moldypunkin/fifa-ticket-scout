@@ -1,0 +1,60 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>extension syntax check</title>
+<!-- Parse-checks every extension script without running it. A syntax error in
+     background.js stops the service worker from starting at all, and one in
+     popup.js leaves the popup blank — both look like "my changes didn't apply".
+     new Function() compiles the source and throws on a parse error, but never
+     executes it, so chrome.* APIs being absent here does not matter.
+
+     Driven by tests/run.py; open directly to see the same output. -->
+<pre id="out">did not run</pre>
+<script>
+(function () {
+  var FILES = [
+    "../extension/tiers.js",
+    "../extension/venue-tiers.js",
+    "../extension/background.js",
+    "../extension/popup.js",
+    "../extension/content.js",
+    "../extension/injected.js",
+    "../extension/event-info.js",
+    "../extension/ticketmaster-adapter.js",
+    "../extension/seatgeek-adapter.js",
+    "../extension/stubhub-adapter.js",
+    "../extension/evenue-adapter.js",
+    "../extension/tickpick-adapter.js"
+  ];
+
+  var lines = [];
+  var failed = 0;
+
+  Promise.all(FILES.map(function (path) {
+    return fetch(path)
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.text();
+      })
+      .then(function (src) {
+        // Compile-only. Throws SyntaxError on a parse failure.
+        new Function(src);
+        return { path: path, ok: true };
+      })
+      .catch(function (err) {
+        return { path: path, ok: false, err: String(err && err.message || err) };
+      });
+  })).then(function (results) {
+    results.forEach(function (r) {
+      if (!r.ok) {
+        failed++;
+        lines.push("FAIL  " + r.path.replace("../", "") + "\n        " + r.err);
+      }
+    });
+    var total = results.length;
+    lines.push(failed
+      ? "SYNTAX-RESULT: FAIL " + failed + "/" + total
+      : "SYNTAX-RESULT: PASS " + total + "/" + total);
+    document.getElementById("out").textContent = lines.join("\n");
+  });
+})();
+</script>

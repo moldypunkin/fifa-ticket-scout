@@ -69,6 +69,9 @@
 
     <!-- Category Tabs + Content -->
     <div class="section cat-tabs-section">
+      <!-- Group the tabs below by the site's own category, or by the seat tier
+           derived in tiers.js. Populated by renderGroupToggle(). -->
+      <div class="group-toggle" id="groupToggle"></div>
       <div class="cat-tabs" id="catTabs"></div>
       <div id="catContent"></div>
     </div>
@@ -182,6 +185,8 @@
     </a>
   </div>
 
+  <script src="venue-tiers.js"></script>
+  <script src="tiers.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

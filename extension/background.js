@@ -1,5 +1,29 @@
 // Background service worker — processes API data and stores it
 
+// Seat-tier mapping. venue-tiers.js defines the data VENUE_TIER_DATA, tiers.js
+// the VenueTiers helpers that read it — load order matters. Both are plain
+// scripts with no deps, so importScripts is safe at service-worker top level.
+// NOTE: VenueTiers is about SEAT tiers; the TIERS constant below is LICENSE
+// tiers. Different things.
+importScripts("venue-tiers.js", "tiers.js");
+
+// Say whether a scan picked up a curated venue mapping or fell back to the
+// section-text heuristic. Falling back is silent otherwise — the tiers still
+// look plausible ("Lower (100s)"), so a venue-name mismatch reads as working.
+function logTierMapping(venueName) {
+  const d = VenueTiers.diagnose(venueName);
+  if (!d.venue) {
+    console.log("[tiers] No venue on this event — using the section heuristic. " +
+                "Check the adapter's `venue=` line above.");
+  } else if (d.matched) {
+    console.log(`[tiers] "${d.venue}" -> "${d.key}" (${d.sections} mapped sections)`);
+  } else {
+    console.log(`[tiers] "${d.venue}" -> "${d.key}" has no mapping — using the ` +
+                `section heuristic. Add an alias to tools/fifa_venue_aliases.json ` +
+                `if this venue is curated in TicketPortal under another name.`);
+  }
+}
+
 // --- Site discrimination ---
 function siteFromUrl(url) {
   try {
@@ -740,6 +764,12 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
     };
   }
 
+  // Venue for seat tiering. Read it back off the game rather than eventInfo so a
+  // scan whose DOM read failed still tiers using the venue an earlier scan got.
+  // Null is fine — tierFor() falls back to the section-text heuristic.
+  const venueName = games[gameKey].match && games[gameKey].match.venue;
+  logTierMapping(venueName);
+
   // descriptionId -> human text ("Lower level of stadium")
   const descriptions = {};
   for (const d of facetsData?._embedded?.description || []) {
@@ -769,12 +799,16 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
         for (const placeId of expandPlaces(compressed)) {
           const parsed = decodePlaceId(placeId);
           if (!parsed) continue;
+          const block = String(parsed.section || facet.section || "");
+          const row = String(parsed.row || "");
           seats[placeId] = {
-            block: String(parsed.section || facet.section || ""),
-            row: String(parsed.row || ""),
+            block,
+            row,
             seat: String(parsed.seat || ""),
             area,
             category,
+            // Parallel to `category`, which is the constant "standard" here.
+            tier: VenueTiers.tierFor(venueName, block, row),
             price,
             exclusive: true,
             site: "ticketmaster",
@@ -844,6 +878,12 @@ async function saveSeatGeekSeats(eventId, body, tabId, site, eventInfo) {
     };
   }
 
+  // Venue for seat tiering. Read it back off the game rather than eventInfo so a
+  // scan whose DOM read failed still tiers using the venue an earlier scan got.
+  // Null is fine — tierFor() falls back to the section-text heuristic.
+  const venueName = games[gameKey].match && games[gameKey].match.venue;
+  logTierMapping(venueName);
+
   const seats = {};
   let missingPrice = 0;
   let seatless = 0;
@@ -875,6 +915,8 @@ async function saveSeatGeekSeats(eventId, body, tabId, site, eventInfo) {
           seat: String(seatNo),
           area: listing.sf || "",
           category: listing.m || "resale",
+          // Parallel to `category`, which is a marketplace constant here.
+          tier: VenueTiers.tierFor(venueName, block, row),
           price,
           exclusive: true,
           site: "seatgeek",
@@ -987,6 +1029,12 @@ async function saveStubHubSeats(eventId, body, tabId, site, eventInfo) {
     };
   }
 
+  // Venue for seat tiering. Read it back off the game rather than eventInfo so a
+  // scan whose DOM read failed still tiers using the venue an earlier scan got.
+  // Null is fine — tierFor() falls back to the section-text heuristic.
+  const venueName = games[gameKey].match && games[gameKey].match.venue;
+  logTierMapping(venueName);
+
   const seats = {};
   let missingPrice = 0;
   let seatless = 0;
@@ -1014,6 +1062,8 @@ async function saveStubHubSeats(eventId, body, tabId, site, eventInfo) {
           seatRange: seatNo ? "" : range,
           area: item.ticketClassName || "",
           category: "resale",
+          // Parallel to `category`, which is a marketplace constant here.
+          tier: VenueTiers.tierFor(venueName, block, row),
           price,
           exclusive: true,
           site: "stubhub",
@@ -1108,6 +1158,12 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
     };
   }
 
+  // Venue for seat tiering. Read it back off the game rather than eventInfo so a
+  // scan whose DOM read failed still tiers using the venue an earlier scan got.
+  // Null is fine — tierFor() falls back to the section-text heuristic.
+  const venueName = games[gameKey].match && games[gameKey].match.venue;
+  logTierMapping(venueName);
+
   const seats = {};
   let unavailable = 0;
   let missingPrice = 0;
@@ -1138,6 +1194,8 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
         seat: seatCd,
         area: idx.PRICELEVELCD !== undefined ? `Price level ${row[idx.PRICELEVELCD]}` : "",
         category: "primary",
+        // Parallel to `category`, which is a marketplace constant here.
+        tier: VenueTiers.tierFor(venueName, block, rowCd),
         price,
         exclusive: true,
         site: "evenue",
@@ -1229,6 +1287,12 @@ async function saveTickPickSeats(eventId, body, tabId, site, eventInfo) {
     };
   }
 
+  // Venue for seat tiering. Read it back off the game rather than eventInfo so a
+  // scan whose DOM read failed still tiers using the venue an earlier scan got.
+  // Null is fine — tierFor() falls back to the section-text heuristic.
+  const venueName = games[gameKey].match && games[gameKey].match.venue;
+  logTierMapping(venueName);
+
   const seatDetails = body.seat_details || null;
   const seats = {};
   let parking = 0;
@@ -1256,6 +1320,8 @@ async function saveTickPickSeats(eventId, body, tabId, site, eventInfo) {
           seat: "",
           area: String(listing.lid || ""),
           category: "resale",
+          // Parallel to `category`, which is a marketplace constant here.
+          tier: VenueTiers.tierFor(venueName, block, row),
           price,
           exclusive: true,
           site: "tickpick",

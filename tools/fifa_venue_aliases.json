@@ -1,0 +1,49 @@
+{
+  "_comment": [
+    "Hand-curated venue aliases, merged into extension/venue-tiers.js by",
+    "build_venue_tiers.py alongside whatever venue_aliases holds in TicketPortal.",
+    "They live here rather than in the generated file so regenerating never drops them.",
+    "",
+    "Keys are FIFA's tournament venue names (sponsor-free, as they appear on",
+    "tickets.fifa.com); values are the canonical key, normally the sponsored name",
+    "marketplaces use. Both sides are lowercased and whitespace-collapsed to match",
+    "normVenue() in tiers.js.",
+    "",
+    "UNVERIFIED: seeded by hand, not scraped from either site. Confirm each against",
+    "a real event page's venue string. A wrong alias silently splits one stadium",
+    "into two keys; a missing one just means the heuristic runs, which is harmless.",
+    "",
+    "Entries whose canonical name is confirmed against a live page should be moved",
+    "into the verified list below."
+  ],
+
+  "unverified": {
+    "new york new jersey stadium": "metlife stadium",
+    "dallas stadium": "at&t stadium",
+    "arlington stadium": "at&t stadium",
+    "houston stadium": "nrg stadium",
+    "kansas city stadium": "arrowhead stadium",
+    "geha field at arrowhead stadium": "arrowhead stadium",
+    "atlanta stadium": "mercedes-benz stadium",
+    "miami stadium": "hard rock stadium",
+    "seattle stadium": "lumen field",
+    "san francisco bay area stadium": "levi's stadium",
+    "bay area stadium": "levi's stadium",
+    "los angeles stadium": "sofi stadium",
+    "philadelphia stadium": "lincoln financial field",
+    "boston stadium": "gillette stadium",
+    "toronto stadium": "bmo field",
+    "vancouver stadium": "bc place",
+    "bc place stadium": "bc place",
+    "estadio ciudad de mexico": "estadio azteca",
+    "estadio ciudad de méxico": "estadio azteca",
+    "mexico city stadium": "estadio azteca",
+    "estadio guadalajara": "estadio akron",
+    "guadalajara stadium": "estadio akron",
+    "estadio monterrey": "estadio bbva",
+    "monterrey stadium": "estadio bbva",
+    "estadio bbva bancomer": "estadio bbva"
+  },
+
+  "verified": {}
+}

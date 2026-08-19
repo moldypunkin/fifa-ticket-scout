@@ -4,6 +4,96 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## August 19, 2026 — v2.4.0
+
+### Marketplace Adapters: SeatGeek, StubHub, Evenue, TickPick
+
+Four more ticket sources alongside Ticketmaster, each following the same shape: an adapter that recognises the event page and resolves its id and identity, `injected.js` routing the capture, and `background.js` normalising the response into the `{ block, row, seat, area, category, price, exclusive }` records the dashboard already consumes.
+
+`event-info.js` was factored out during the SeatGeek work so every adapter reads event name, date, and venue the same way — JSON-LD first, then `og:title`, then `document.title`.
+
+Capture is passive wherever forging a request would mean impersonating a session. SeatGeek's page already fetches `/api/event_listings_v2` on load, so the extension reads that rather than issuing its own request and walking into `scrape_uuid`, Talos, and DataDome. StubHub and TickPick emit listings rather than individual seats, so a listing without enumerated seat numbers expands into that many rows with a blank seat and, for StubHub, a `seatRange` — inventory the dashboard should be counting is not dropped just because the seats are not named. Evenue ships a header row alongside its data and the seat payload prefixes sections with a level (`KU:101`), which is stripped to `101`.
+
+*Written from the code and commit history rather than from release notes — worth a read before publishing.*
+
+### Cross-Site Seat Tiers
+
+Ported the venue tiering from the TicketPortal ticketboard so marketplace listings can be grouped and compared the way FIFA listings already are.
+
+The FIFA sites carry a real `category` (CAT 1/2/3/4). The five marketplace adapters do not — each stamps a constant (`"resale"`, `"primary"`, `"standard"`), which made the popup's category breakdown a single meaningless bucket on those sites. `tiers.js` derives a seating tier from the section text instead, so a Ticketmaster "Section 315" and a StubHub "315" land in the same band.
+
+It resolves in three steps: a saved whole-section rule for the venue, then a row-band rule whose range contains the row, then the `tierOf()` section-text heuristic. `venue-tiers.js` holds the saved rules as a build-time export — the two repos are separate Supabase projects, so there is no live read — and it currently ships aliases only, meaning every listing takes the heuristic path for now. Row bands rank both letter rows (A–Z, then AA behind Z) and numeric rows.
+
+The tier lands in a **parallel `tier` field**; `category` is never overwritten, so nothing that reads FIFA categories changes. CSV export gains a `Tier` column, derived at export time for seats scanned before this shipped.
+
+Venue aliases fold FIFA's tournament names onto the sponsored names marketplaces use ("Dallas Stadium" → "at&t stadium"). These were seeded by hand and are flagged in-file as unverified against live venue strings.
+
+### Export Pipeline for Custom Tiers
+
+The custom per-venue mappings live in TicketPortal's `venue_aliases`, `venue_tiers`, and `venue_sections` tables. An anon read of those returns HTTP 200 with zero rows — RLS filters them, which the `created_by` column and the app's login gate both imply — so there is no live path from this repo, and pulling them needs credentials this build should not hold.
+
+Instead there is a repeatable export:
+
+1. `tools/export_venue_tiers.sql` — run in the **TicketPortal** project's SQL editor, where service_role bypasses RLS. Returns one JSON cell holding all three tables in `VENUE_TIER_DATA` shape.
+2. Save that cell to `tools/venue_tiers_export.json` (gitignored — it is a data dump from another project).
+3. `python tools/build_venue_tiers.py` regenerates `extension/venue-tiers.js`.
+
+The generator re-normalizes section keys through a Python mirror of `normSec()`, so whatever casing TicketPortal stored lines up with what `tierFor()` looks up — `"Section 101"` becomes `"101"`. It folds venue names through `normVenue()`, merges aliased venues (deduping tiers on name, keeping the lowest sort), drops rules with no tier and sections that normalize to an empty key, and sorts everything for a stable diff. `--stats` prints per-venue rule counts without writing; `--only <venue>` limits output, since TicketPortal tracks venues well beyond the sixteen World Cup stadiums and each unused one is dead weight in the shipped extension.
+
+Curated FIFA venue aliases moved to `tools/fifa_venue_aliases.json` so regenerating never drops them, split into `verified` and `unverified` groups. They are merged on top of the database aliases, so a hand fix beats a stale row.
+
+### First Real Export
+
+The TicketPortal export landed: **22 venues, 1584 sections, 1623 rules, 75 row bands.**
+
+Exactly one is a World Cup venue — **Arrowhead Stadium**, with 149 hand-curated sections (`Cat A - LL Chiefs Center 3`, `Cat F - LL Endzone`, `Cat J - Club Endzone`). The other 21 are college football stadiums, Sphere, and theatres. They still earn their place: the Ticketmaster, StubHub, SeatGeek, TickPick, and Evenue adapters are not FIFA-restricted, so tiering works on any event at those venues. Shipping all 22 costs 130 KB; `--only "arrowhead stadium"` cuts it to 14 KB if that trade stops being worth it.
+
+Row bands are exercised by exactly one venue, Michigan Stadium, which holds all 75.
+
+**A generator bug, caught by the structural validators rather than in production.** TicketPortal holds the same building twice: `arrowhead stadium` with the curated tiers, and `geha field at arrowhead stadium` with 23 sections of auto-seeded `tierOf()` defaults (`Lower (100s)`, `Club / Mezz (200s)`). The curated alias folds them onto one key, and the first version of the merge concatenated rather than resolved — stacking two catch-all rules on all 23 shared sections, with `tierFor()` taking whichever landed first. Every one of the 23 conflicted, so the auto-seeded default could beat the curated tier.
+
+The merge now resolves: the canonical venue's own rows win, an aliased venue only fills sections the canonical one leaves undefined, and skipped duplicates are reported by source venue. Primary is picked by name match, then by richest mapping, then alphabetically, so runs are reproducible.
+
+Worth fixing upstream: four more venue pairs show the same split without aliases to fold them — `bobby dodd stadium` / `bobby dodd stadium atlanta, ga`, and the same shape for `bridgeforth`, `lane`, and `neyland`. Neither side is curated yet, so nothing is lost today, but aliasing them in TicketPortal would consolidate the mappings.
+
+### Fixes From First Live Use
+
+Three things surfaced testing against a real Arrowhead Stadium event.
+
+**Stored tiers went stale and shadowed the fix.** The popup read `s.tier` and only computed a tier when that was absent. But `tier` is stamped at scan time, while `venue-tiers.js` ships with the extension and changes on release — so seats scanned before a mapping landed kept a stale `Upper (300s)` forever, and the corrected lookup never ran. Symptom: the toggle correctly reported `arrowhead stadium · 149 mapped sections` while the tabs still showed generic heuristic bands. The tier is now always recomputed at render and export time; `normSec` and `venueKey` are both memoized, so the cost is negligible. Background still stamps `tier` on the Supabase payload, where a point-in-time snapshot is what you want.
+
+**Venue names carry city suffixes.** `event-info.js` reads the venue from JSON-LD `location.name`, and marketplaces write `"Arrowhead Stadium, Kansas City, MO"` or append the city with no separator at all — the same shape as `bobby dodd stadium atlanta, ga` in TicketPortal's own rows. An exact lookup misses those silently. `venueKey()` now tries the exact name, then drops trailing comma-separated fragments, then longest-prefix-matches against known venue keys, requiring a word boundary so one venue cannot swallow another. Results are memoized, and the cache invalidates on `VENUE_TIER_DATA` identity so a swapped dataset cannot serve stale keys.
+
+**The heuristic fallback was invisible.** A curated mapping and the section-text heuristic both produce plausible tier names, so a venue mismatch read as working. The Group by toggle now names the matched venue and its section count, or flags `unmapped · heuristic` in Tier mode, and `background.js` logs one `[tiers]` line per scan naming the venue, the key it resolved to, and whether a mapping was found.
+
+Arrowhead resolves to 149 sections — 123 numeric bowl sections plus parking, suites and club areas — across 17 tiers, 14 of them the curated `Cat A - LL Chiefs Center 3` through `Cat N - Upper Endzone`.
+
+### Test Harness
+
+`tests/tiers.test.js` covers the port against the TicketPortal originals — 47 assertions over the heuristic, row-band resolution, alias folding, and ordering.
+
+There is no node on the machines this was built on, so `tests/run.py` drives the suite through headless Chrome instead, which is the browser the extension targets anyway. `tests/runner.html` loads the real `venue-tiers.js` and `tiers.js` in load order and the test file writes a `TIERS-RESULT` marker the runner greps out of the dumped DOM; the runner exits non-zero on failure. The test file detects its host, so `node tests/tiers.test.js` also works wherever node is available.
+
+The suite is in three phases: pure functions, structural validation of the generated `venue-tiers.js`, and resolution against a controlled fixture that replaces the shipped data — so a new export can never break the resolution tests.
+
+Phase two is the one that earns its keep. It catches classes of bad data that would otherwise fail silently at runtime: an alias pointing at another alias (`venueKey()` does one hop, so a chain resolves to the wrong venue), a `tiers`/`sections` key that is itself aliased away so nothing ever looks it up, a section key that is not `normSec`-normalized and therefore unreachable, a section mixing numeric and lettered row bands where `rowRank` makes "row 5 vs row E" a coin flip, and a section with two catch-all rules. All of them pass on an empty file, so they held before the first export and keep holding after.
+
+`tests/syntax.html` parse-checks all twelve extension scripts before the unit tests run, because a parse error in `background.js` stops the service worker from starting and one in `popup.js` leaves the popup blank — both look exactly like "my changes did not apply", and neither is visible until the extension is loaded in Chrome. `tests/run.py` runs it first and stops there if it fails.
+
+Verified in both directions: 68/68 green, and three deliberate corruptions — an alias chain, an unnormalized section key, and mixed band types — each produced a named failure and a non-zero exit. Breaking one branch of `tierOf()` produced three failures across all three of its call paths.
+
+### Group By: Category or Tier
+
+A **Group by** switch above the category tabs flips the whole panel — tabs, price histogram, and cheapest clusters — between the site's own category and the seat tier. Each side shows how many buckets it would split into.
+
+The default is per site rather than fixed: when a site reports fewer than two distinct categories, Tier is selected and a short note says why, because Category would otherwise render one tab covering everything. FIFA, with real CAT 1/2/3/4, still opens on Category. An explicit choice wins and persists alongside the existing filters.
+
+Tier tabs sort stadium-inward via `tierRank()` rather than by seat count, and long tier names abbreviate to their `Cat A` prefix with the full name on hover. Switching modes resets the active tab to All, since the two produce different bucket counts. The category dot only keeps its colour when every seat in a bucket agrees on it — a tier can span several FIFA categories.
+
+**Files changed:** `extension/tiers.js` (new), `extension/venue-tiers.js` (new, generated), `tools/export_venue_tiers.sql` (new), `tools/build_venue_tiers.py` (new), `tools/fifa_venue_aliases.json` (new), `tests/tiers.test.js` (new), `tests/runner.html` (new), `tests/run.py` (new), `.gitignore`, `extension/background.js`, `extension/popup.js`, `extension/popup.html`, `extension/popup.css`
+
+---
+
 ## August 13, 2026 — v2.3.5
 
 ### Fix: Ticketmaster Seats Imported Without Prices

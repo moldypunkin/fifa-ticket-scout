@@ -245,6 +245,7 @@ function loadData() {
       // Restore persisted filters
       if (data.filters) {
         activeCatIndex = data.filters.activeCatIndex ?? -1;
+        groupBy = data.filters.groupBy ?? null;
         selectedTogether = new Set(data.filters.selectedTogether ?? [1, 2, 3, 4, 5, 6]);
       }
 
@@ -369,7 +370,7 @@ function renderDashboard(game) {
 
   renderMatchInfo(match);
   renderStatsBar(seats);
-  renderCategorySections(seats);
+  renderCategorySections(seats, match?.venue);
   renderBlockTable(seats);
 }
 
@@ -593,25 +594,124 @@ function renderStatsBar(seats) {
 let activeCatIndex = -1;
 let currentCatData = [];
 
+// How the tabs below are grouped: "category" (the site's own value) or "tier"
+// (the seating band from tiers.js). Null means the user has not chosen, in
+// which case resolveGroupBy() picks per site.
+let groupBy = null;
+
+// The marketplace adapters stamp one constant category on every seat
+// ("resale"/"primary"/"standard"), so grouping by it yields a single tab that
+// separates nothing — default those sites to Tier. FIFA has real CAT 1/2/3/4
+// and keeps defaulting to Category. An explicit choice always wins.
+function resolveGroupBy(seats) {
+  if (groupBy) return groupBy;
+  const distinct = new Set(seats.map((s) => s.category || "Unknown"));
+  return distinct.size < 2 ? "tier" : "category";
+}
+
 function saveFilters() {
-  chrome.storage.local.set({ filters: { activeCatIndex, selectedTogether: [...selectedTogether] } });
+  chrome.storage.local.set({ filters: { activeCatIndex, groupBy, selectedTogether: [...selectedTogether] } });
 }
 let selectedTogether = new Set([1, 2, 3, 4, 5, 6]); // all ON by default
 
-function renderCategorySections(seats) {
+// The Category | Tier switch above the tabs. Rendered on every pass so the
+// active side and the hint stay in step with what is actually being shown.
+function renderGroupToggle(seats, venue, mode) {
+  const el = document.getElementById("groupToggle");
+  if (!el) return;
+
+  // Nothing to switch between when there is only one bucket either way.
+  const catCount = new Set(seats.map((s) => s.category || "Unknown")).size;
+  const tierCount = new Set(
+    seats.map((s) => VenueTiers.tierFor(venue, s.block, s.row))
+  ).size;
+  if (catCount < 2 && tierCount < 2) {
+    el.innerHTML = "";
+    return;
+  }
+
+  // In Tier mode, say where the tiers came from. A curated venue mapping and
+  // the section-text heuristic both produce plausible-looking tiers, so without
+  // this a venue-name mismatch reads as working — you would just quietly get
+  // "Lower (100s)" instead of "Cat F - LL Endzone".
+  let hint = "";
+  if (mode === "tier") {
+    const d = VenueTiers.diagnose(venue);
+    if (d.matched) {
+      hint = `<span class="group-toggle-hint" title="Matched venue key: ${escapeHtml(d.key)}">` +
+             `${escapeHtml(d.key)} &middot; ${d.sections} mapped sections</span>`;
+    } else if (!d.venue) {
+      hint = `<span class="group-toggle-hint group-toggle-warn" ` +
+             `title="No venue on this event, so the section-text heuristic is used">` +
+             `no venue &middot; heuristic</span>`;
+    } else {
+      hint = `<span class="group-toggle-hint group-toggle-warn" ` +
+             `title="&quot;${escapeHtml(d.venue)}&quot; has no mapping, so the section-text heuristic is used">` +
+             `${escapeHtml(d.key)} unmapped &middot; heuristic</span>`;
+    }
+  } else if (catCount < 2) {
+    hint = `<span class="group-toggle-hint">this site reports one category</span>`;
+  }
+
+  const btn = (value, label, count) => `
+    <button class="group-toggle-btn ${mode === value ? "active" : ""}" data-group="${value}">
+      ${label} <span class="group-toggle-count">${count}</span>
+    </button>`;
+
+  el.innerHTML = `
+    <span class="group-toggle-label">Group by</span>
+    <span class="group-toggle-btns">
+      ${btn("category", "Category", catCount)}
+      ${btn("tier", "Tier", tierCount)}
+    </span>
+    ${hint}`;
+
+  el.querySelectorAll(".group-toggle-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      if (b.dataset.group === mode) return;
+      groupBy = b.dataset.group;
+      // The two modes produce different bucket counts, so a held index would
+      // point at the wrong tab. Fall back to All.
+      activeCatIndex = -1;
+      saveFilters();
+      renderCategorySections(seats, venue);
+    });
+  });
+}
+
+function renderCategorySections(seats, venue) {
   const tabsEl = document.getElementById("catTabs");
   const contentEl = document.getElementById("catContent");
 
-  // Group seats by category
+  const mode = resolveGroupBy(seats);
+  renderGroupToggle(seats, venue, mode);
+
+  // Group seats by category, or by seat tier when that is the active mode.
+  //
+  // The tier is ALWAYS recomputed here rather than read from the stored
+  // `s.tier`. That field is a snapshot from scan time, but venue-tiers.js
+  // ships with the extension and changes on release — so a seat scanned
+  // before a mapping landed keeps a stale tier forever, and the corrected
+  // lookup never runs. Recomputing is cheap: normSec and venueKey are both
+  // memoized. FIFA seats have no stored tier at all and need this anyway.
   const groups = {};
   for (const s of seats) {
-    const cat = s.category || "Unknown";
+    const cat = mode === "tier"
+      ? VenueTiers.tierFor(venue, s.block, s.row)
+      : (s.category || "Unknown");
     if (!groups[cat]) groups[cat] = { seats: [], color: s.color };
+    // A tier can span several FIFA categories, so the dot colour is only
+    // meaningful when every seat in the bucket agrees on it.
+    else if (groups[cat].color !== s.color) groups[cat].color = null;
     groups[cat].seats.push(s);
   }
 
-  // Sort by seat count descending
+  // Tiers read stadium-inward, which is the whole point of them; categories
+  // keep the seat-count ordering they have always had.
   currentCatData = Object.entries(groups).sort((a, b) => {
+    if (mode === "tier") {
+      return VenueTiers.tierRank(venue, a[0]) - VenueTiers.tierRank(venue, b[0]);
+    }
     return b[1].seats.length - a[1].seats.length;
   });
 
@@ -633,9 +733,14 @@ function renderCategorySections(seats) {
 
   const catTabs = currentCatData
     .map(([cat, data], i) => {
-      const shortName = cat.replace("Category ", "Cat ");
+      // Tier names may be long ("Cat A - LL Chiefs Center 3") — show the short
+      // form on the pill and the full name on hover.
+      const shortName = mode === "tier"
+        ? VenueTiers.tierAbbrev(cat)
+        : cat.replace("Category ", "Cat ");
+      const title = shortName !== cat ? ` title="${escapeHtml(cat)}"` : "";
       const dotColor = data.color || "#6b7588";
-      return `<button class="cat-tab ${i === activeCatIndex ? "active" : ""}" data-index="${i}">
+      return `<button class="cat-tab ${i === activeCatIndex ? "active" : ""}" data-index="${i}"${title}>
         <span class="category-dot" style="background:${dotColor}"></span>${escapeHtml(shortName)}
         <span class="cat-tab-count">${data.seats.length}</span>
       </button>`;
@@ -649,7 +754,7 @@ function renderCategorySections(seats) {
     btn.addEventListener("click", () => {
       activeCatIndex = parseInt(btn.dataset.index);
       saveFilters();
-      renderCategorySections(seats);
+      renderCategorySections(seats, venue);
     });
   });
 
@@ -777,7 +882,7 @@ function renderCategorySections(seats) {
         selectedTogether = new Set([1, 2, 3, 4, 5, 6]);
       }
       saveFilters();
-      renderCategorySections(seats);
+      renderCategorySections(seats, venue);
     });
   });
 
@@ -1089,7 +1194,10 @@ function exportCSV() {
     // Seat_Range carries StubHub listings whose seats could not be enumerated
     // (e.g. 3 tickets across 13-18). Empty for every other site and for rows
     // that do have a seat number.
-    const header = "Block,Area,Row,Seat,Seat_Range,Category,Price_USD,Exclusive";
+    // Tier is the cross-site seating band from tiers.js. On the FIFA sites
+    // Category is the real CAT 1/2/3/4 and Tier sits alongside it; on the
+    // marketplaces Category is a constant and Tier is the useful column.
+    const header = "Block,Area,Row,Seat,Seat_Range,Category,Tier,Price_USD,Exclusive";
     const rows = seats
       .sort((a, b) =>
         a.price - b.price
@@ -1099,7 +1207,12 @@ function exportCSV() {
       )
       .map((s) => {
         const area = s.area.includes(",") ? `"${s.area}"` : s.area;
-        return `${s.block},${area},${s.row},${s.seat},${s.seatRange || ""},${s.category},${centsToUSD(s.price).toFixed(2)},${s.exclusive}`;
+        // Recomputed, not read from s.tier — see renderCategorySections: the
+        // stored value is a scan-time snapshot and goes stale when the shipped
+        // venue mapping changes.
+        const tier = VenueTiers.tierFor(match?.venue, s.block, s.row);
+        const tierCell = tier.includes(",") ? `"${tier}"` : tier;
+        return `${s.block},${area},${s.row},${s.seat},${s.seatRange || ""},${s.category},${tierCell},${centsToUSD(s.price).toFixed(2)},${s.exclusive}`;
       });
 
     const csv = [...meta, "", header, ...rows].join("\n");

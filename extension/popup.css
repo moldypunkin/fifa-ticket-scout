@@ -2563,3 +2563,78 @@ body {
   background: var(--green);
   color: var(--white);
 }
+
+/* --- Group-by toggle (Category | Tier) above the category tabs --- */
+
+.group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 0;
+  background: var(--gray-50);
+}
+
+.group-toggle:empty {
+  display: none;
+}
+
+.group-toggle-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--gray-500);
+}
+
+.group-toggle-btns {
+  display: inline-flex;
+  border: 1px solid var(--border-dark);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--white);
+}
+
+.group-toggle-btn {
+  padding: 3px 10px;
+  border: none;
+  background: transparent;
+  color: var(--gray-600);
+  font-size: 10.5px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.group-toggle-btn + .group-toggle-btn {
+  border-left: 1px solid var(--border-dark);
+}
+
+.group-toggle-btn:hover:not(.active) {
+  color: var(--gray-800);
+}
+
+.group-toggle-btn.active {
+  color: var(--white);
+  background: var(--fifa-purple);
+}
+
+/* Bucket count for each side, so the switch shows what it would split into. */
+.group-toggle-count {
+  font-size: 9.5px;
+  font-weight: 700;
+  opacity: 0.65;
+}
+
+/* Shown when the site gives every seat the same category, so Tier is the only
+   grouping that separates anything. */
+.group-toggle-hint {
+  font-size: 10px;
+  color: var(--gray-500);
+}
+
+/* Tier mode fell back to the section heuristic — the tiers shown are generic
+   (100s/200s/300s), not the curated per-venue ones. */
+.group-toggle-warn {
+  color: var(--fifa-purple);
+  opacity: 0.85;
+}

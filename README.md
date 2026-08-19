@@ -4,7 +4,7 @@ A Chrome extension that tracks real-time seat prices for FIFA World Cup 2026 tic
 
 ![Chrome Extension](https://img.shields.io/badge/Chrome-Extension-blue?logo=googlechrome&logoColor=white)
 ![Manifest V3](https://img.shields.io/badge/Manifest-V3-green)
-![Version](https://img.shields.io/badge/version-2.3.0-brightgreen)
+![Version](https://img.shields.io/badge/version-2.4.0-brightgreen)
 
 ## Screenshots
 

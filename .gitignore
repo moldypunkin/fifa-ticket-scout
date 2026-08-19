@@ -11,3 +11,7 @@ notes/
 fifa-ticket-scout-*.zip
 supabase/migrate_*.sql
 supabase/seed_*.sql
+
+# Venue tier export dumped from the TicketPortal Supabase project.
+# Regenerate with tools/export_venue_tiers.sql; not committed.
+tools/venue_tiers_export.json
