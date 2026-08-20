@@ -4,7 +4,7 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
-## August 19, 2026 — v2.6.0
+## August 20, 2026 — v2.6.1
 
 ### Marketplace Adapters: SeatGeek, StubHub, Evenue, TickPick
 
@@ -15,6 +15,21 @@ Four more ticket sources alongside Ticketmaster, each following the same shape: 
 Capture is passive wherever forging a request would mean impersonating a session. SeatGeek's page already fetches `/api/event_listings_v2` on load, so the extension reads that rather than issuing its own request and walking into `scrape_uuid`, Talos, and DataDome. StubHub and TickPick emit listings rather than individual seats, so a listing without enumerated seat numbers expands into that many rows with a blank seat and, for StubHub, a `seatRange` — inventory the dashboard should be counting is not dropped just because the seats are not named. Evenue ships a header row alongside its data and the seat payload prefixes sections with a level (`KU:101`), which is stripped to `101`.
 
 *Written from the code and commit history rather than from release notes — worth a read before publishing.*
+
+### CSV Filenames Name Their Source
+
+Exports are now prefixed with the site they came from:
+
+```
+stubhub_Nebraska_Cornhuskers_vs__Iowa_Hawkeyes_20260820_1435.csv
+tickpick_Nebraska_Cornhuskers_vs__Iowa_Hawkeyes_20260820_1435.csv
+fifa-resale_Portugal_vs__Spain_20260820_1435.csv
+fifa-lms_Portugal_vs__Spain_20260820_1435.csv
+```
+
+The site leads rather than trails so exports of one match from several sites sort together by source instead of interleaving. `resale` and `lms` get distinct tags — they are different FIFA sites with different prices, and the file's `# Site:` header already told them apart. An unrecognised site slugs its own name rather than going anonymous.
+
+The slugs are a separate map from `SITE_BRANDS`, which is display copy ("StubHub Scout") and collapses resale and lms into one name.
 
 ### Fix: Venues Whose Key Carries a Disambiguator
 

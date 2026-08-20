@@ -456,6 +456,28 @@ const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatG
 
 // The header follows the active site. `lms` and `resale` are both FIFA
 // properties, so they keep the original name.
+// Filename slug per site, for CSV exports. Deliberately not SITE_BRANDS —
+// that is display copy ("StubHub Scout") and collapses resale and lms into a
+// single name, but those are different FIFA sites with different prices and
+// the export already distinguishes them in its `# Site:` header.
+const SITE_FILE_TAGS = {
+  resale: "fifa-resale",
+  lms: "fifa-lms",
+  ticketmaster: "ticketmaster",
+  seatgeek: "seatgeek",
+  stubhub: "stubhub",
+  evenue: "evenue",
+  tickpick: "tickpick",
+};
+
+function siteFileTag(site) {
+  const known = SITE_FILE_TAGS[site];
+  if (known) return known;
+  // An unrecognised site still names itself rather than going anonymous.
+  const cleaned = String(site || "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return cleaned || "unknown-site";
+}
+
 const SITE_BRANDS = {
   lms: "FIFA Ticket Scout",
   resale: "FIFA Ticket Scout",
@@ -1222,7 +1244,9 @@ function exportCSV() {
     const ts = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}_${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}`;
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${matchName}_${ts}.csv`;
+    // Site first: exports from several sites for the same match then sort
+    // together by source rather than interleaving.
+    a.download = `${siteFileTag(game.site)}_${matchName}_${ts}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   });
