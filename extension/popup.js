@@ -706,14 +706,12 @@ function renderCategorySections(seats, venue) {
     groups[cat].seats.push(s);
   }
 
-  // Tiers read stadium-inward, which is the whole point of them; categories
-  // keep the seat-count ordering they have always had.
-  currentCatData = Object.entries(groups).sort((a, b) => {
-    if (mode === "tier") {
-      return VenueTiers.tierRank(venue, a[0]) - VenueTiers.tierRank(venue, b[0]);
-    }
-    return b[1].seats.length - a[1].seats.length;
-  });
+  // Both modes sort alphabetically, so a tab sits where you expect to find it
+  // rather than moving as seat counts shift. tierNameCmp keeps row-split
+  // families ("Cat A", "Cat A1", "Cat A2") adjacent and handles numbers, so
+  // "Category 2" precedes "Category 10".
+  currentCatData = Object.entries(groups)
+    .sort((a, b) => VenueTiers.tierNameCmp(a[0], b[0]));
 
   if (currentCatData.length === 0) {
     tabsEl.innerHTML = "";
@@ -2248,10 +2246,49 @@ function handleSaveAlerts() {
 
 // --- Scan All Sections ---
 
+// Sites whose inventory is read from the page's OWN network traffic rather
+// than a request we issue. There is no scan to start on these: injected.js
+// captures whatever the page fetches. Reloading the tab is what re-runs it.
+const PASSIVE_CAPTURE_SITES = ["stubhub", "seatgeek", "evenue", "tickpick"];
+
 function startScan() {
   getCurrentTabUrl().then((url) => {
     const tabSite = siteFromUrl(url);
-    
+
+    // Without this branch these sites fall through to the FIFA path below,
+    // which looks for a perfId in the url, finds none, grabs whatever game is
+    // first in storage, and reports "Browse to a match seat map first so the
+    // extension can detect the game IDs" — a message about a mechanism that
+    // does not apply to them.
+    if (PASSIVE_CAPTURE_SITES.includes(tabSite)) {
+      const label = { stubhub: "StubHub", seatgeek: "SeatGeek", evenue: "Evenue", tickpick: "TickPick" }[tabSite];
+      console.log(`[FIFA Scout] ${label} uses passive capture — reloading the tab to re-read its listings`);
+
+      scanStartTime = Date.now();
+      scanElapsed = 0;
+      lastPillPct = 0;
+      lastMatchName = null;
+      document.getElementById("dashboard").style.display = "none";
+      document.getElementById("noData").style.display = "block";
+      document.getElementById("liveBadge").style.display = "none";
+      document.getElementById("emptyTitle").textContent = "Reloading...";
+      document.getElementById("emptyHint").textContent =
+        `${label} listings are captured as the page loads them. Reloading the tab now — ` +
+        `reopen this popup once it finishes.`;
+      const action = document.getElementById("emptyAction");
+      if (action) action.style.display = "none";
+      setBrand(tabSite);
+
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tab = tabs && tabs[0];
+        if (!tab) return;
+        // bypassCache: a served-from-cache response never reaches the fetch
+        // hook, so a normal reload can look like a dead capture.
+        chrome.tabs.reload(tab.id, { bypassCache: true });
+      });
+      return;
+    }
+
     if (tabSite === "ticketmaster") {
       // Ticketmaster scan
       const eventIdMatch = url.match(/\/event\/([A-F0-9]+)/i);

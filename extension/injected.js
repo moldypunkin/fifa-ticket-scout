@@ -66,6 +66,106 @@
     return MATCH_PATTERNS.some((p) => url.includes(p));
   }
 
+  // Counted once per response, at the single point each hook decides. Calling
+  // this from inside shouldCapture would double-count: the fetch hook asks
+  // twice, once for headers and once for the body.
+  function countResponse(matched) {
+    capStats.seen++;
+    if (matched) capStats.matched++;
+    scheduleCaptureSummary();
+  }
+
+  // ─── Capture diagnostics ─────────────────────────────────────────────────
+  // On the passive-capture sites the whole pipeline is silent when it fails:
+  // if nothing matches MATCH_PATTERNS nothing is logged, and if a match is not
+  // JSON the parse sits in a bare `catch {}`. Both look identical to "the site
+  // returned no seats". These counters say which actually happened, and go
+  // through console.log so content.js relays them into Download Logs.
+  const SITE_TAG = isStubHub ? "SH" : isSeatGeek ? "SG" : isEvenue ? "EV"
+    : isTickPick ? "TP" : isTicketmaster ? "TM" : "FIFA";
+  const capStats = { seen: 0, matched: 0, parsed: 0, notJson: 0, posted: 0 };
+  let capSummaryTimer = null;
+
+  function scheduleCaptureSummary() {
+    if (capSummaryTimer) return;
+    capSummaryTimer = setTimeout(() => {
+      capSummaryTimer = null;
+      console.log(`[${SITE_TAG}] capture: ${capStats.seen} responses seen, ` +
+        `${capStats.matched} matched ${JSON.stringify(MATCH_PATTERNS)}, ` +
+        `${capStats.parsed} parsed as JSON, ${capStats.notJson} not JSON, ` +
+        `${capStats.posted} sent to the service worker`);
+      if (capStats.matched === 0) {
+        console.log(`[${SITE_TAG}] nothing matched ${JSON.stringify(MATCH_PATTERNS)} — the ` +
+          `inventory endpoint is not covered by it.`);
+        reportCandidates();
+      } else if (capStats.posted === 0) {
+        console.log(`[${SITE_TAG}] matched but nothing was sent — the response was not ` +
+          `JSON, so the endpoint pattern is catching the wrong request.`);
+      }
+    }, 12000);
+  }
+
+  // ─── Candidate endpoints ─────────────────────────────────────────────────
+  // When MATCH_PATTERNS catches nothing, the useful question is "then what DID
+  // the page fetch?". Recording candidates as they go by answers that on the
+  // FIRST run, instead of needing a code edit to set DISCOVERY_SITE and a
+  // second reload. Only runs while nothing has matched yet, and only for JSON
+  // responses on the passive-capture sites, so the cost disappears the moment
+  // capture works.
+  const isPassiveSite = isStubHub || isSeatGeek || isEvenue || isTickPick;
+  const MAX_CANDIDATES = 60;
+  const CANDIDATE_MIN_CHARS = 2000;
+  const candidates = new Map();   // path -> largest byte length seen
+
+  function recordCandidate(url, response) {
+    if (!isPassiveSite || capStats.matched > 0) return;
+    if (candidates.size >= MAX_CANDIDATES) return;
+    const clean = String(url).split("?")[0];
+    if (PROBE_SKIP.test(clean)) return;
+    const type = (response.headers && response.headers.get("content-type")) || "";
+    if (!type.includes("json")) return;
+    response.clone().text().then((t) => {
+      if (!t || t.length < CANDIDATE_MIN_CHARS) return;
+      const prev = candidates.get(clean) || 0;
+      if (t.length > prev) candidates.set(clean, t.length);
+    }).catch(() => {});
+  }
+
+  function reportCandidates() {
+    if (!candidates.size) {
+      console.log(`[${SITE_TAG}] no JSON responses over ${CANDIDATE_MIN_CHARS} chars were seen ` +
+        `either — the page may be serving from cache; try a hard reload.`);
+      return;
+    }
+    const ranked = [...candidates.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
+    console.log(`[${SITE_TAG}] largest JSON responses the page fetched (candidate endpoints):`);
+    ranked.forEach(([path, len], i) => {
+      console.log(`[${SITE_TAG}]   ${i + 1}. ${Math.round(len / 1024)}KB  ${path}`);
+    });
+  }
+
+  // One line per matched response, with the body's top-level shape. That shape
+  // is what background.js routes on (StubHub needs `items`, TickPick and
+  // SeatGeek need `listings`), so a mismatch is visible here.
+  function noteCapture(url, body, ok) {
+    const short = String(url).split("?")[0].slice(-90);
+    if (!ok) {
+      capStats.notJson++;
+      console.log(`[${SITE_TAG}] matched but not JSON: ${short}`);
+      return;
+    }
+    capStats.parsed++;
+    let shape = typeof body;
+    if (Array.isArray(body)) {
+      shape = `array(${body.length})`;
+    } else if (body && typeof body === "object") {
+      const keys = Object.keys(body);
+      shape = `{${keys.slice(0, 8).join(",")}${keys.length > 8 ? ",…" : ""}}`;
+    }
+    capStats.posted++;
+    console.log(`[${SITE_TAG}] captured ${short} -> ${shape}`);
+  }
+
   // ─── Endpoint discovery (TEMPORARY, per new site) ────────────────────────
   // Reports any JSON response big enough to be an inventory payload, from
   // document_start — earlier than a console paste can hook, which is the only
@@ -310,7 +410,7 @@
   //      chatty enough to blow out the buffer in seconds.
   //   2. Guard re-entrancy. Our postMessage is observed by the listener below,
   //      and anything that logs while handling a message would loop forever.
-  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[TM]", "[SG]", "[SH]", "[EV]", "[TP]", "[TP-PROBE]", "[EV-PROBE]", "[SH-PROBE]"];
+  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[FIFA]", "[TM]", "[SG]", "[SH]", "[EV]", "[TP]", "[TP-PROBE]", "[EV-PROBE]", "[SH-PROBE]", "[SG-PROBE]", "[TM-PROBE]"];
   const originalLog = console.log;
   let relayingLog = false;
   console.log = function (...args) {
@@ -342,8 +442,10 @@
   window.fetch = async function (...args) {
     const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
 
+    const willCapture = shouldCapture(url);
+
     // Capture headers from any seatmap request the page makes
-    if (shouldCapture(url) && !capturedHeaders) {
+    if (willCapture && !capturedHeaders) {
       const init = args[1] || {};
       if (init.headers) {
         capturedHeaders = init.headers instanceof Headers
@@ -362,16 +464,22 @@
       });
     }
 
-    if (shouldCapture(url)) {
+    countResponse(willCapture);
+    if (!willCapture) recordCandidate(url, response);
+
+    if (willCapture) {
       try {
         const clone = response.clone();
         const body = await clone.json();
+        noteCapture(url, body, true);
         window.postMessage(
           { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(url), body, eventInfo: pageEventInfo() },
           "*"
         );
       } catch {
-        // not JSON or parse error
+        // Not JSON, or the body was already consumed. Previously silent, which
+        // made a wrong endpoint pattern indistinguishable from an empty event.
+        noteCapture(url, null, false);
       }
     }
 
@@ -414,7 +522,10 @@
       });
     }
 
-    if (this._ftsUrl && shouldCapture(this._ftsUrl)) {
+    const xhrWillCapture = !!this._ftsUrl && shouldCapture(this._ftsUrl);
+    if (this._ftsUrl) countResponse(xhrWillCapture);
+
+    if (xhrWillCapture) {
       // Capture headers from real XHR requests
       if (!capturedHeaders && this._ftsHeaders && Object.keys(this._ftsHeaders).length > 0) {
         capturedHeaders = { ...this._ftsHeaders };
@@ -424,12 +535,13 @@
       this.addEventListener("load", function () {
         try {
           const body = JSON.parse(this.responseText);
+          noteCapture(this._ftsUrl, body, true);
           window.postMessage(
             { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(this._ftsUrl), body, eventInfo: pageEventInfo() },
             "*"
           );
         } catch {
-          // not JSON
+          noteCapture(this._ftsUrl, null, false);
         }
       });
     }

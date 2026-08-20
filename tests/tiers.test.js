@@ -77,6 +77,35 @@
   eq(V.tierAbbrev("A-B"), "A-B", "tierAbbrev ignores hyphen without spaces");
   eq(V.tierAbbrev(null), "", "tierAbbrev null");
 
+  // tierNameCmp — tab order. Row-split families must stay adjacent: Michigan
+  // Stadium names them "Cat A" / "Cat A1" / "Cat A2" with different text after
+  // the " - ", which is why the sort keys on the abbreviation.
+  eq([
+    "Cat B1 - 25-50 yardline Visitor Side rows 41-96",
+    "Cat A2 - 25-50 yardline Home side rows 85 and up (Chairback seating)",
+    "Cat A - 25-50 yardline Home side rows 1-40",
+    "Cat B - 25-50 yardline Visitor Side rows 1-40",
+    "Cat A1 - 25-50 yardline Home side rows 41-84",
+  ].sort(V.tierNameCmp).map(V.tierAbbrev),
+     ["Cat A", "Cat A1", "Cat A2", "Cat B", "Cat B1"],
+     "tierNameCmp keeps row-split families together and in order");
+
+  eq(["Cat C1 - x", "Cat B - y", "Cat C - z", "Cat A - w"].sort(V.tierNameCmp).map(V.tierAbbrev),
+     ["Cat A", "Cat B", "Cat C", "Cat C1"], "tierNameCmp base before its splits");
+
+  // Numeric collation, not digit-by-digit.
+  eq(["Category 10", "Category 2", "Category 1"].sort(V.tierNameCmp),
+     ["Category 1", "Category 2", "Category 10"], "tierNameCmp sorts numbers numerically");
+  eq(["Upper (400+)", "Upper (300s)"].sort(V.tierNameCmp),
+     ["Upper (300s)", "Upper (400+)"], "tierNameCmp orders bowl levels numerically");
+
+  // Heuristic names have no " - ", so they compare whole.
+  eq(["Other", "Floor / GA", "Lower (100s)", "Club / Mezz (200s)"].sort(V.tierNameCmp),
+     ["Club / Mezz (200s)", "Floor / GA", "Lower (100s)", "Other"],
+     "tierNameCmp is plain alphabetical for heuristic tiers");
+
+  eq([null, "Cat A - x"].sort(V.tierNameCmp), [null, "Cat A - x"], "tierNameCmp tolerates null");
+
   eq(["AA", "B", "A", "Z"].sort(V.rowCmp), ["A", "B", "Z", "AA"], "rowCmp seating depth");
   eq(["12", "2", "1"].sort(V.rowCmp), ["1", "2", "12"], "rowCmp numeric rows");
 
@@ -178,13 +207,27 @@
   // ═══ 3. resolution, against a controlled fixture ═════════════════════════
   // Replace the shipped data outright so these assertions do not shift when a
   // new export lands. Everything below is about tierFor's LOGIC, not the data.
-
-  root.self.VENUE_TIER_DATA = {
+  //
+  // Always swap in a FRESH object rather than mutating the live one. tiers.js
+  // caches venueKey lookups and the base-name index against the identity of
+  // VENUE_TIER_DATA, which is sound because the extension never mutates it —
+  // but an in-place edit here would be served stale results and test nothing.
+  let fixture = {
     version: 0,
     aliases: { "dallas stadium": "at&t stadium" },
     tiers: {},
     sections: {},
   };
+  function useFixture(changes) {
+    fixture = {
+      version: 0,
+      aliases: changes.aliases || fixture.aliases,
+      tiers: changes.tiers || fixture.tiers,
+      sections: changes.sections || fixture.sections,
+    };
+    root.self.VENUE_TIER_DATA = fixture;
+  }
+  root.self.VENUE_TIER_DATA = fixture;
 
   eq(V.venueKey("Dallas Stadium"), "at&t stadium", "fixture alias folds");
   eq(V.tierFor("AT&T Stadium", "315", "K"), "Upper (300s)", "no mapping -> heuristic");
@@ -192,15 +235,19 @@
   eq(V.tierRank("AT&T Stadium", "Lower (100s)") < V.tierRank("AT&T Stadium", "Upper (300s)"),
      true, "tierRank falls back to stadium-inward TIER_ORDER");
 
-  root.self.VENUE_TIER_DATA.sections["at&t stadium"] = {
-    "101": [{ from: null, to: null, tier: "Cat 1 - Sideline Lower" }],
-    "205": [
-      { from: "A", to: "M", tier: "Cat 1 - Club Front" },
-      { from: "N", to: "Z", tier: "Cat 2 - Club Rear" },
-      { from: null, to: null, tier: "Cat 3 - Club Other" },
-    ],
-    "310": [{ from: "1", to: "10", tier: "Cat 2 - Upper Front" }],
-  };
+  useFixture({
+    sections: {
+      "at&t stadium": {
+        "101": [{ from: null, to: null, tier: "Cat 1 - Sideline Lower" }],
+        "205": [
+          { from: "A", to: "M", tier: "Cat 1 - Club Front" },
+          { from: "N", to: "Z", tier: "Cat 2 - Club Rear" },
+          { from: null, to: null, tier: "Cat 3 - Club Other" },
+        ],
+        "310": [{ from: "1", to: "10", tier: "Cat 2 - Upper Front" }],
+      },
+    },
+  });
 
   eq(V.tierFor("Dallas Stadium", "Section 101", "7"), "Cat 1 - Sideline Lower",
      "whole-section rule, reached via alias + normSec");
@@ -233,13 +280,57 @@
   eq(V.diagnose("Nowhere Arena").matched, false, "diagnose reports a miss");
   eq(V.diagnose(null).venue, null, "diagnose handles a missing venue");
 
-  root.self.VENUE_TIER_DATA.tiers["at&t stadium"] = [
-    { tier: "Cat 3 - Club Other", sort: 0 },
-    { tier: "Cat 1 - Club Front", sort: 1 },
-  ];
+  useFixture({
+    tiers: {
+      "at&t stadium": [
+        { tier: "Cat 3 - Club Other", sort: 0 },
+        { tier: "Cat 1 - Club Front", sort: 1 },
+      ],
+    },
+  });
   eq(V.tierRank("AT&T Stadium", "Cat 3 - Club Other") < V.tierRank("AT&T Stadium", "Cat 1 - Club Front"),
      true, "saved per-venue sort beats TIER_ORDER");
   eq(V.tierRank("AT&T Stadium", "Not A Tier"), 1e6, "unknown tier sorts last");
+
+  // Keys carrying a hand-typed disambiguator the real venue string lacks.
+  // "Memorial Stadium - NE" is how TicketPortal distinguishes Nebraska's from
+  // every other Memorial Stadium; no marketplace ever writes that suffix.
+  useFixture({
+    aliases: {},
+    tiers: {},
+    sections: {
+      "memorial stadium - ne": { "101": [{ from: null, to: null, tier: "Cat A - Nebraska Lower" }] },
+      "tiger stadium - baton rouge": { "101": [{ from: null, to: null, tier: "Cat A - LSU Lower" }] },
+      "michigan stadium": { "101": [{ from: null, to: null, tier: "Cat A - Michigan" }] },
+    },
+  });
+
+  eq(V.venueKey("Memorial Stadium"), "memorial stadium - ne",
+     "bare name resolves to its disambiguated key");
+  eq(V.venueKey("Memorial Stadium, Lincoln, NE"), "memorial stadium - ne",
+     "disambiguated key reached through a city suffix too");
+  eq(V.tierFor("Memorial Stadium", "101", "5"), "Cat A - Nebraska Lower",
+     "curated tier reached from the bare venue name");
+  eq(V.tierFor("Tiger Stadium", "Section 101", "5"), "Cat A - LSU Lower",
+     "same for a city-style disambiguator");
+  eq(V.hasVenueMapping("Memorial Stadium"), true, "diagnose/hint will report a match");
+  eq(V.venueKey("Michigan Stadium"), "michigan stadium",
+     "keys without a disambiguator are unaffected");
+
+  // Ambiguity must NOT be guessed: labelling seats with another stadium's
+  // categories is worse than falling back to the heuristic.
+  useFixture({
+    sections: {
+      "memorial stadium - ne": { "101": [{ from: null, to: null, tier: "Cat A - Nebraska" }] },
+      "memorial stadium - il": { "101": [{ from: null, to: null, tier: "Cat A - Illinois" }] },
+    },
+  });
+  eq(V.venueKey("Memorial Stadium"), "memorial stadium",
+     "ambiguous base is left unresolved rather than guessed");
+  eq(V.tierFor("Memorial Stadium", "101", "5"), "Lower (100s)",
+     "ambiguous venue falls back to the heuristic");
+  eq(V.venueKey("Memorial Stadium, Champaign, IL"), "memorial stadium - il",
+     "ambiguity resolved when the name carries the disambiguator");
 
   // ═══ report ══════════════════════════════════════════════════════════════
   const total = passed + failed;

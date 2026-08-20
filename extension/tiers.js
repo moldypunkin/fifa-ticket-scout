@@ -111,6 +111,38 @@
       if (known[head]) return head;
     }
 
+    // The reverse case: the KEY is longer than the incoming name. TicketPortal
+    // keys sometimes carry a hand-typed disambiguator that no real venue string
+    // has — "memorial stadium - ne", "tiger stadium - baton rouge",
+    // "the midland theatre - mo". A page saying "Memorial Stadium" would
+    // otherwise never reach 122 curated sections.
+    //
+    // Only matched when the base name is UNAMBIGUOUS. Guessing between two
+    // same-named venues would label seats with another stadium's categories,
+    // which is worse than falling back to the heuristic.
+    const idx = baseIndex();
+
+    // One base name -> one key, or null when it cannot be settled honestly.
+    const resolveBase = (base) => {
+      const hits = idx.get(base);
+      if (!hits || !hits.length) return null;
+      if (hits.length === 1) return hits[0];
+      // Ambiguous base: accept only when exactly one key's disambiguator also
+      // appears in the incoming name ("memorial stadium, lincoln, ne").
+      const narrowed = hits.filter((k) => {
+        const suffix = k.slice(k.lastIndexOf(" - ") + 3).trim();
+        return suffix && n.indexOf(suffix) >= 0;
+      });
+      return narrowed.length === 1 ? narrowed[0] : null;
+    };
+
+    const heads = [n];
+    for (let i = parts.length - 1; i > 0; i--) heads.push(parts.slice(0, i).join(",").trim());
+    for (let h = 0; h < heads.length; h++) {
+      const hit = resolveBase(heads[h]);
+      if (hit) return hit;
+    }
+
     // No separator at all ("bobby dodd stadium atlanta, ga"): longest known
     // key that this name starts with. Require a word boundary so "lane
     // stadium" cannot swallow "lane stadium annex".
@@ -120,9 +152,41 @@
     };
     Object.keys(known).forEach(consider);
     Object.keys(alias).forEach(consider);
-    if (best) return alias[best] || best;
+    idx.forEach((hits, base) => consider(base));
+    if (best) {
+      if (alias[best]) return alias[best];
+      if (known[best]) return best;
+      // `best` is a base name; it only counts if it settles to one key.
+      const hit = resolveBase(best);
+      if (hit) return hit;
+    }
 
     return n;
+  }
+
+  // base name (everything before a trailing " - ") -> keys carrying it.
+  // Rebuilt whenever VENUE_TIER_DATA is swapped, same rule as VENUE_KEY.
+  let BASE_INDEX = null;
+  let BASE_INDEX_SOURCE = null;
+
+  function baseIndex() {
+    const data = root.VENUE_TIER_DATA || null;
+    if (BASE_INDEX && data === BASE_INDEX_SOURCE) return BASE_INDEX;
+    const idx = new Map();
+    const add = (key) => {
+      const cut = key.lastIndexOf(" - ");
+      if (cut <= 0) return;
+      const base = key.slice(0, cut).trim();
+      if (!base || base === key) return;
+      const list = idx.get(base) || [];
+      if (list.indexOf(key) < 0) list.push(key);
+      idx.set(base, list);
+    };
+    Object.keys((data && data.sections) || {}).forEach(add);
+    Object.keys((data && data.tiers) || {}).forEach(add);
+    BASE_INDEX = idx;
+    BASE_INDEX_SOURCE = data;
+    return idx;
   }
 
   // The cache is keyed to the data object it was built from, so swapping
@@ -253,6 +317,25 @@
     return i >= 0 ? s.slice(0, i).trim() : s;
   }
 
+  // Alphabetical order for the popup's tier tabs.
+  //
+  // Sorts on the ABBREVIATED name, not the full one. A venue that splits a
+  // category by row names the parts "Cat A", "Cat A1", "Cat A2" with different
+  // descriptions after the " - " (Michigan Stadium does exactly this). Sorting
+  // full strings would let those descriptions interleave the family; sorting
+  // "Cat A" / "Cat A1" / "Cat A2" keeps them adjacent and in split order. The
+  // full name breaks ties so the result is stable.
+  //
+  // numeric collation so "Cat 2" precedes "Cat 10", and "Upper (300s)" precedes
+  // "Upper (400+)", rather than sorting digit-by-digit.
+  function tierNameCmp(a, b) {
+    const opts = { numeric: true, sensitivity: "base" };
+    const aa = tierAbbrev(a);
+    const bb = tierAbbrev(b);
+    return aa.localeCompare(bb, undefined, opts) ||
+           String(a == null ? "" : a).localeCompare(String(b == null ? "" : b), undefined, opts);
+  }
+
   // True when this venue has real saved mappings, i.e. tierFor is doing better
   // than the bare heuristic.
   function hasVenueMapping(venue) {
@@ -268,6 +351,7 @@
     tierFor,
     tierRank,
     tierAbbrev,
+    tierNameCmp,
     hasVenueMapping,
     diagnose,
     normVenue,

@@ -4,7 +4,7 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
-## August 19, 2026 — v2.4.0
+## August 19, 2026 — v2.6.0
 
 ### Marketplace Adapters: SeatGeek, StubHub, Evenue, TickPick
 
@@ -15,6 +15,32 @@ Four more ticket sources alongside Ticketmaster, each following the same shape: 
 Capture is passive wherever forging a request would mean impersonating a session. SeatGeek's page already fetches `/api/event_listings_v2` on load, so the extension reads that rather than issuing its own request and walking into `scrape_uuid`, Talos, and DataDome. StubHub and TickPick emit listings rather than individual seats, so a listing without enumerated seat numbers expands into that many rows with a blank seat and, for StubHub, a `seatRange` — inventory the dashboard should be counting is not dropped just because the seats are not named. Evenue ships a header row alongside its data and the seat payload prefixes sections with a level (`KU:101`), which is stripped to `101`.
 
 *Written from the code and commit history rather than from release notes — worth a read before publishing.*
+
+### Fix: Venues Whose Key Carries a Disambiguator
+
+Nebraska's 122 curated sections were not reaching the popup. TicketPortal stores that venue as `memorial stadium - ne` — a hand-typed suffix distinguishing it from every other Memorial Stadium — and no marketplace ever writes it, so `"Memorial Stadium"` matched nothing and fell back to the heuristic.
+
+Venue matching already handled the incoming name being LONGER than the key (city suffixes). This is the reverse: the key is longer than the name. `venueKey()` now also indexes each key by its base name, the part before a trailing `" - "`, and resolves from there. Four venues in the current export are affected: `memorial stadium - ne`, `tiger stadium - baton rouge`, `the midland theatre - mo`, and `darrell k. royal - texas memorial stadium`.
+
+Ambiguity is never guessed. A base name is only accepted when exactly one key carries it, or when exactly one candidate's disambiguator also appears in the incoming name — so `"Memorial Stadium, Champaign, IL"` picks Illinois, while a bare `"Memorial Stadium"` with two candidates stays unmapped and falls back to the heuristic. Labelling seats with another stadium's categories is worse than showing generic bands.
+
+The no-separator shape is covered too: `"Memorial Stadium Lincoln, NE"` resolves the same way `"Bobby Dodd Stadium Atlanta, GA"` already did.
+
+Phase 3 of the test suite now swaps in a fresh fixture object for every change rather than mutating the live one. `venueKey` and the base-name index both cache against the identity of `VENUE_TIER_DATA`, which is sound because the extension never mutates it — but an in-place edit in a test would have been served stale results and verified nothing.
+
+### Fix: Scan Button Broken on the Passive-Capture Sites
+
+`startScan()` branched for Ticketmaster and then fell through to the FIFA path for everything else. On StubHub, SeatGeek, Evenue, and TickPick that path looked for a `perfId` in the url, found none, picked whichever game happened to be first in storage, checked it for a `productId` those sites never have, and reported *"Browse to a match seat map first so the extension can detect the game IDs"* — a message about a mechanism that does not apply to them.
+
+Those four sites have no scan to start: `injected.js` reads the inventory out of the page's own network traffic. So they now get their own branch that reloads the tab with `bypassCache: true`, which is what actually re-runs the capture, and says so. Cache bypass matters — a response served from cache never reaches the fetch hook, so a plain reload can look like a dead capture.
+
+### Capture Diagnostics
+
+The passive-capture pipeline failed silently in two different ways that looked identical to "this event has no seats": nothing matching `MATCH_PATTERNS` logged nothing at all, and a match that was not JSON landed in a bare `catch {}`.
+
+Both are now reported through the existing log relay, so **Download Logs** picks them up: a per-response tally of how many were seen, matched, parsed, and forwarded, plus one line per captured response naming the body's top-level keys — which is what `background.js` routes on, so a shape mismatch (`items` for StubHub, `listings` for SeatGeek and TickPick) is visible rather than inferred.
+
+When nothing matches, the log also ranks the largest JSON responses the page did fetch. That answers "then which endpoint should we be matching?" on the first run, rather than requiring the `DISCOVERY_SITE` constant to be edited and the page reloaded a second time. The recording stops as soon as anything matches, so it costs nothing once a site works.
 
 ### Cross-Site Seat Tiers
 
@@ -88,7 +114,11 @@ A **Group by** switch above the category tabs flips the whole panel — tabs, pr
 
 The default is per site rather than fixed: when a site reports fewer than two distinct categories, Tier is selected and a short note says why, because Category would otherwise render one tab covering everything. FIFA, with real CAT 1/2/3/4, still opens on Category. An explicit choice wins and persists alongside the existing filters.
 
-Tier tabs sort stadium-inward via `tierRank()` rather than by seat count, and long tier names abbreviate to their `Cat A` prefix with the full name on hover. Switching modes resets the active tab to All, since the two produce different bucket counts. The category dot only keeps its colour when every seat in a bucket agrees on it — a tier can span several FIFA categories.
+Tabs sort alphabetically in both modes, so a tab sits where you expect rather than moving as seat counts shift. The comparator (`tierNameCmp`) sorts on the ABBREVIATED name, which is what keeps a row-split family together: Michigan Stadium names its splits `Cat A` / `Cat A1` / `Cat A2` with different descriptions after the `" - "`, and sorting full strings would let those descriptions interleave the family. Collation is numeric, so `Category 2` precedes `Category 10` and `Upper (300s)` precedes `Upper (400+)`.
+
+One consequence worth knowing: this replaces the stadium-inward ordering, so the per-venue `sort` column from TicketPortal's `venue_tiers` no longer drives tab order. `tierRank()` is still there and still tested, just unused by the tab strip.
+
+Long tier names abbreviate to their `Cat A` prefix with the full name on hover. Switching modes resets the active tab to All, since the two produce different bucket counts. The category dot only keeps its colour when every seat in a bucket agrees on it — a tier can span several FIFA categories.
 
 **Files changed:** `extension/tiers.js` (new), `extension/venue-tiers.js` (new, generated), `tools/export_venue_tiers.sql` (new), `tools/build_venue_tiers.py` (new), `tools/fifa_venue_aliases.json` (new), `tests/tiers.test.js` (new), `tests/runner.html` (new), `tests/run.py` (new), `.gitignore`, `extension/background.js`, `extension/popup.js`, `extension/popup.html`, `extension/popup.css`
 
