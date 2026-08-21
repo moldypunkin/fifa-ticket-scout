@@ -16,6 +16,64 @@ Capture is passive wherever forging a request would mean impersonating a session
 
 *Written from the code and commit history rather than from release notes — worth a read before publishing.*
 
+### Flat Per-Ticket Fees
+
+Fees were modelled only as a per-site multiplier, which cannot describe Evenue: its price-level table quotes a base price and the site adds a fixed amount per ticket, so the whole board read low by the same dollar figure at every price point. `centsToUSD()` now applies a flat fee after the multiplier, via `FEE_FLAT_BY_SITE`.
+
+**The evenue value is provisional and stays that way.** 5.00 was measured against one Virginia Tech event, not read from the source. The GraphQL payload does carry a `TIERED FEES` field, which looked like the real table — but logging its value showed it empty (`{}`) on this event, so the fee is not published anywhere the passive capture can see it. It is most likely a per-ticket service fee added at checkout.
+
+That leaves a constant, and a per-SITE one standing in for what is really per-VENUE. It is wrong the moment a second school is tried. If it needs to vary, `scan_config` — already fetched from Supabase on every load — can carry it without a release.
+
+### Evenue: Join Prices From the Price-Level Table
+
+On Virginia Tech's Paciolan build every seat row carries `SLP_PRICE=null`, so all 63,225 rows were dropped and the popup sat on "Waiting for listings" against an event that plainly had seats. Kansas, the build this was written against, puts the price inline. VT instead carries it in a GraphQL payload at `data.discovery.eventDetailMPT[]`, under `PL_PT_PRICES` — price level by price type — with `PRICELEVELCD` on the seat row as the join key.
+
+That payload is found by CONTENT — any object carrying `PL_PT_PRICES`, or both `SEASONCD` and `ITEMCD` — rather than by walking a path. Paciolan names its GraphQL result keys with a space in them: the container is literally `data["discovery eventDetailMPT"]`, not `data.discovery.eventDetailMPT`. A path lookup found nothing, logged the payload as unrecognised, and left the seat payload held for a table that never arrived.
+
+It is then turned into a `priceLevel -> price` map stored on the game. When a seat row has no inline price, the level is looked up. `SEASONCD` + `ITEMCD` in the payload reconstruct the same event id the seat url produces (`F26` + `01` -> `F26:01`), so prices attach to the right event without depending on the url shape.
+
+The inner structure of `PL_PT_PRICES` is not documented anywhere visible, so the extractor walks it and accepts what it finds: a flat `level -> price` map, a `level -> {priceType: price}` map (cheapest wins), or rows carrying the level and price as fields. Level keys are matched as one-to-three alphanumerics — the codes are `"1"`, `"12"`, `"A"` — because a looser pattern invented a bogus level out of a container name AND stopped the walk before reaching the real ones. When nothing usable comes out, the raw shape is logged rather than the event silently staying empty.
+
+Cents versus dollars is decided once per map, from the numbers: any decimals mean dollars, otherwise a maximum at or above 2000 means cents. Getting that wrong is a 100x error on screen, so the decision is stated in the log next to the first few levels it produced.
+
+Seat and price payloads can arrive in either order. Prices normally come first on this build, but when they do not the seat payload is held in memory and re-parsed once the table lands, rather than waiting for a reload.
+
+The "not the seat array" log now describes bodies five levels deep rather than three, which is what it takes to see inside `PL_PT_PRICES` rather than just its name.
+
+`describeShape()` recursed into arrays but not objects, so every GraphQL body logged as `{data}` and deepening it changed nothing — which cost a diagnostic round. It now recurses into both, which is what surfaced `PL_PT_PRICES` at all.
+
+### Service Worker Logs Reach Download Logs
+
+`injected.js` mirrored its console output into storage via `content.js`, so Download Logs showed the page side of a capture. The service worker wrote only to its own console, behind `chrome://extensions` → "service worker" — a place nobody thinks to look. The effect: a payload that was captured fine and then REJECTED by the parser produced exactly the same evidence as a capture that never happened.
+
+`bgLog()` now writes both. Same 1000-line cap and batching as the page side.
+
+The Evenue parse failures say what they actually found rather than only what was missing. Its header row is located by sniffing for known column names, so a school whose columns are named differently lands in the same branch as an empty event: the log now names the payload shape, lists each element's shape, and prints any element that looks like column names. A missing required column reports the columns that ARE present. The success line — seat count and row count — is relayed too, since that is the one that says parsing worked.
+
+Paciolan's page makes ~18 calls to `/pac-api/consumer/gql`, so the "not the seat array" line is reported once per path rather than once per response.
+
+### Evenue: Match Paciolan Endpoints Across Schools
+
+Evenue support was confirmed against one school's instance (Kansas, `/event/F26/02`, `/pac-api/seat-availability/`), and the capture pinned that exact path. Paciolan builds differ between schools, so on another school a near-miss like `/pac-api/seat-availability-v2/` was invisible and the popup sat on "Waiting for listings…".
+
+Capture now matches `/pac-api/` generally and lets the payload shape decide, which is what `background.js` was already checking. Event ids are pulled by `evenueEventIdFromUrl()`, which handles `event-id/<id>` in the path, `?eventId=` / `?event-id=` in the query, a colon-joined id sitting bare in the path, and the URL-encoded form of each — all normalising to `<season>:<code>` with any leading venue/distributor segment dropped (`977:F26:02` → `F26:02`).
+
+A `/pac-api/` response that is NOT the seat payload now logs its path and top-level shape instead of being dropped in silence, and one that looks right but yields no event id says so by name.
+
+The candidate-endpoint recorder no longer filters to JSON. Evenue is a legacy CGI platform whose inventory can arrive as server-rendered HTML, so a JSON-only filter went blind on exactly the site most likely to need it; content type is now recorded and reported alongside each candidate rather than used as a gate.
+
+### Fix: Stale Event Name After an In-Page Navigation
+
+Switching to another event without a full page reload left the popup showing the previous event's name over the new event's seats.
+
+`readEventInfo()` reads JSON-LD first because it is structured and unambiguous. But sites render that block server-side and client-side routers generally do not replace it, so after an in-page navigation it still describes the event you came from. `og:title` is rendered the same way and goes stale with it.
+
+A JSON-LD node is now trusted only when its own `url` (or `mainEntityOfPage`) points at the page actually being viewed. Comparison is on path plus the event-identifying query params — Evenue keys events off the query string while the others use the path — normalized for trailing slashes and case so cosmetic differences do not read as a different event. A node carrying no url of its own cannot be checked and is kept, since rejecting those would discard the only source on pages that work fine. When the page's own node is missing, the name falls back to `document.title`, which is the one thing a client-side router does keep current.
+
+`background.js` now MERGES event info into the stored match instead of replacing it. The fallback read returns a name but no date or venue, and overwriting outright would null the venue and silently drop that event back to heuristic tiers. The game key is per-event, so what is already stored belongs to the same event and is safe to keep.
+
+Known limitation: on an in-page navigation to an event never seen before, the name is correct but date and venue may be unavailable until a full reload, so tiering falls back to the heuristic. The Group by hint reports that as `unmapped · heuristic` rather than hiding it, and a reload fills it in permanently.
+
 ### CSV Filenames Name Their Source
 
 Exports are now prefixed with the site they came from:
@@ -68,6 +126,35 @@ It resolves in three steps: a saved whole-section rule for the venue, then a row
 The tier lands in a **parallel `tier` field**; `category` is never overwritten, so nothing that reads FIFA categories changes. CSV export gains a `Tier` column, derived at export time for seats scanned before this shipped.
 
 Venue aliases fold FIFA's tournament names onto the sponsored names marketplaces use ("Dallas Stadium" → "at&t stadium"). These were seeded by hand and are flagged in-file as unverified against live venue strings.
+
+### Import Categories From the Popup
+
+An **Import Categories** button in the actions row takes the same CSV the build script does, so a venue can be mapped without touching the repo or rebuilding the extension. Below it, a line reports what is currently imported — sections, venues, row bands, and the venue names — with a **Remove** control that restores the built-in mapping.
+
+`extension/venue-import.js` is a JS mirror of the build script's CSV reader, deliberately duplicated rather than shared: the two run in different languages, and a file that imports in the app but fails at build time (or the reverse) would be worse than the duplication. It handles quoted fields, so a spreadsheet export with a comma in a venue or category name works. A file is refused whole on any problem, with up to six line-numbered reasons shown, rather than half-applied.
+
+Imported rows are stored raw in `chrome.storage.local` and layered over the shipped `venue-tiers.js` at runtime; the shipped file is never written to. So rebuilding it from the TicketPortal export cannot clobber an import, and removing an import restores it exactly. The overlay is applied in the service worker as well as the popup, so the `tier` stamped onto seats at scan time agrees with what is rendered, and a `chrome.storage.onChanged` listener re-applies it without waiting for a worker restart.
+
+Venue names in an import are resolved through `venueKey()`, the same path a live page's venue takes. A hand-written `Memorial Stadium` lands on the shipped `memorial stadium - ne` rather than creating a second venue that would then shadow 122 curated sections on an exact-match lookup. An imported venue and section REPLACES the shipped rules for that section rather than adding to them, so a correction fixes the mapping instead of stacking a second rule beside the wrong one.
+
+### Import Venue Categories From a CSV
+
+The only way in was the TicketPortal SQL export, which is no help for a venue TicketPortal does not track or for a mapping that needs correcting by hand. `tools/venue_categories.csv` is now a second source, merged on top of the export every build, so an entry there beats the database and survives re-running the export.
+
+```
+python tools/build_venue_tiers.py --import my_venue.csv
+python tools/build_venue_tiers.py
+```
+
+`tools/venue_categories.sample.csv` documents the format and is itself importable. Columns are `venue, section, row_from, row_to, tier, sort`: leave both row columns blank for a whole section, fill them for an inclusive row band, leave `section` blank to set a category's tab position without mapping anything. Column order follows the header row, so optional columns can be reordered or dropped.
+
+Importing a venue+section REPLACES whatever was held for that section rather than adding to it, so re-importing a corrected file fixes a wrong mapping instead of stacking a second one beside it. Sections not mentioned are left alone.
+
+A file is validated whole and refused whole — a silently dropped row is worse than a failed import. The checks are the ones `tests/tiers.test.js` runs against the generated file, moved to where the error can name a line number: two catch-all rules on one section, numeric and lettered row bands mixed in one section, a band running backwards, an unrankable row bound, one category claiming two sort positions, missing venue or tier, and an unparseable sort.
+
+Venue names are resolved the way `tiers.js` resolves them at runtime, including the base-name step. A hand-written `Memorial Stadium` lands on the export's `memorial stadium - ne` rather than creating a second venue beside it — which would have shadowed 122 curated sections with whatever few the CSV held, since the shorter name wins an exact-match lookup. An ambiguous base is left alone and reported rather than guessed.
+
+The TicketPortal export is no longer required. With a category CSV present the build runs from that alone, and with neither it says how to produce either one.
 
 ### Export Pipeline for Custom Tiers
 

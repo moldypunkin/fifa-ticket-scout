@@ -332,6 +332,194 @@
   eq(V.venueKey("Memorial Stadium, Champaign, IL"), "memorial stadium - il",
      "ambiguity resolved when the name carries the disambiguator");
 
+  // ═══ 4. event identity (browser only) ════════════════════════════════════
+  // event-info.js touches window/document at load, so it is only present under
+  // the headless-Chrome runner. Skipped, not failed, under node.
+
+  const EI = root.self.__eventInfo;
+  if (EI) {
+    // Same event, cosmetic differences only.
+    eq(EI.pageIdentity("https://www.stubhub.com/x/event/12345/"),
+       EI.pageIdentity("https://www.stubhub.com/x/event/12345"),
+       "pageIdentity ignores a trailing slash");
+    eq(EI.pageIdentity("https://www.stubhub.com/X/Event/12345"),
+       EI.pageIdentity("https://www.stubhub.com/x/event/12345"),
+       "pageIdentity ignores case");
+    eq(EI.pageIdentity("https://www.stubhub.com/x/event/12345?quantity=2") ===
+       EI.pageIdentity("https://www.stubhub.com/x/event/12345?quantity=4"),
+       true, "pageIdentity ignores non-event query params");
+
+    // Different events.
+    eq(EI.pageIdentity("https://www.stubhub.com/x/event/12345") ===
+       EI.pageIdentity("https://www.stubhub.com/x/event/99999"),
+       false, "pageIdentity separates different event ids");
+    // Evenue keys events off the query string, not the path.
+    eq(EI.pageIdentity("https://x.evenue.net/cgi-bin/ncommerce3?eventId=111") ===
+       EI.pageIdentity("https://x.evenue.net/cgi-bin/ncommerce3?eventId=222"),
+       false, "pageIdentity separates events that differ only by query param");
+
+    const page = "https://www.stubhub.com/team/event/12345";
+    eq(EI.ldNodeIsStale({ url: "https://www.stubhub.com/team/event/99999" }, page),
+       true, "a JSON-LD node naming another event is stale");
+    eq(EI.ldNodeIsStale({ url: "https://www.stubhub.com/team/event/12345/" }, page),
+       false, "the node for this event is not stale");
+    eq(EI.ldNodeIsStale({ mainEntityOfPage: "https://www.stubhub.com/team/event/99999" }, page),
+       true, "mainEntityOfPage is checked too");
+    eq(EI.ldNodeIsStale({ mainEntityOfPage: { url: "https://www.stubhub.com/team/event/99999" } }, page),
+       true, "mainEntityOfPage as an object");
+
+    // A node with no url of its own cannot be checked. Keep it: rejecting
+    // these would throw away the only source on pages that work fine.
+    eq(EI.ldNodeIsStale({ name: "Some Event" }, page), false,
+       "a node without a url is kept rather than assumed stale");
+    eq(EI.ldNodeIsStale(null, page), false, "no node is not stale");
+    eq(EI.ldNodeIsStale({ url: "" }, page), false, "an empty url is not stale");
+
+    eq(EI.cleanTitle("Portugal vs. Spain Tickets | StubHub"), "Portugal vs. Spain",
+       "cleanTitle strips the suffix the fallback path relies on");
+    eq(EI.normalizeEventDate("2026-06-15T19:00:00-04:00"), "15-06-2026 - 19:00",
+       "normalizeEventDate keeps venue-local wall clock");
+  } else {
+    lines.push("note  event-info.js not loaded (node run) — section 4 skipped");
+  }
+
+  // ═══ 5. venue category import (browser only) ═════════════════════════════
+  // venue-import.js parses the CSV documented in
+  // tools/venue_categories.sample.csv. It must accept and reject exactly what
+  // tools/build_venue_tiers.py does, or a file that imports in the app would
+  // fail at build time and vice versa.
+
+  const VI = root.self.VenueImport;
+  if (VI) {
+    const good = [
+      "# a comment",
+      "venue,section,row_from,row_to,tier,sort",
+      "Lane Stadium,1,,,Cat A - Lower,0",
+      "Lane Stadium,Section 2,,,Cat A - Lower,",
+      "Lane Stadium,20,A,M,Cat A - Lower,",
+      "Lane Stadium,20,N,Z,Cat B - Corner,1",
+      "Lane Stadium,20,,,Cat C - Endzone,2",
+      "",
+      "Lane Stadium,,,,Cat C - Endzone,2",
+    ].join("\n");
+
+    const parsed = VI.parse(good);
+    eq(parsed.problems, [], "a valid file parses without problems");
+    eq(parsed.rows.length, 6, "every non-comment, non-blank row is kept");
+    eq(parsed.rows[1].section, "2", "section is normalized on import");
+    eq(parsed.rows[0].venue, "lane stadium", "venue is normalized on import");
+
+    const summary = VI.summarize(parsed.rows);
+    eq([summary.venues, summary.sections, summary.bands, summary.ordering],
+       [1, 3, 2, 1], "summarize counts venues, sections, bands and ordering rows");
+
+    // Column order is taken from the header, not assumed.
+    const reordered = VI.parse("tier,venue,section\nCat Z - Reordered,Some Place,7");
+    eq(reordered.problems, [], "columns may be reordered");
+    eq(reordered.rows[0].tier, "Cat Z - Reordered", "reordered columns map correctly");
+    eq(reordered.rows[0].section, "7", "reordered columns map correctly (section)");
+
+    // Quoted fields, because real spreadsheet exports have commas in names.
+    const quoted = VI.parse('venue,section,tier\n"Smith, Jr. Arena",101,"Cat A - Lower, Front"');
+    eq(quoted.problems, [], "quoted fields parse");
+    eq(quoted.rows[0].venue, "smith, jr. arena", "comma inside a quoted venue survives");
+    eq(quoted.rows[0].tier, "Cat A - Lower, Front", "comma inside a quoted tier survives");
+
+    // Every rejection the build script makes, the app must make too.
+    const bad = VI.parse([
+      "venue,section,row_from,row_to,tier,sort",
+      "Bad Arena,101,,,Cat A,0",
+      "Bad Arena,101,,,Cat B,1",
+      "Bad Arena,202,5,E,Cat C,",
+      "Bad Arena,303,M,A,Cat D,",
+      "Bad Arena,505,,,,",
+      "Bad Arena,606,,,Cat F,abc",
+      "Bad Arena,,,,Cat E,7",
+      "Bad Arena,,,,Cat E,9",
+    ].join("\n"));
+    const joined = bad.problems.join(" | ");
+    eq(/no tier/.test(joined), true, "rejects a row with no tier");
+    eq(/not a whole number/.test(joined), true, "rejects a non-numeric sort");
+    eq(/catch-all rows/.test(joined), true, "rejects two catch-alls on one section");
+    eq(/mixes numeric and lettered/.test(joined), true, "rejects mixed band types");
+    eq(/runs backwards/.test(joined), true, "rejects a reversed row band");
+    eq(/sort given as both/.test(joined), true, "rejects one category with two sorts");
+
+    eq(VI.parse("nope,nothing\n1,2").problems.length > 0, true, "rejects a file with no venue/tier header");
+    eq(VI.parse("venue,tier,bogus\nA,B,C").problems.length > 0, true, "rejects an unknown column");
+
+    // ── overlay ────────────────────────────────────────────────────────────
+    const base = {
+      version: 9,
+      aliases: { "the big house": "michigan stadium" },
+      tiers: { "michigan stadium": [{ tier: "Cat A - Old", sort: 0 }] },
+      sections: {
+        "michigan stadium": {
+          "1": [{ from: null, to: null, tier: "Cat A - Old" }],
+          "2": [{ from: null, to: null, tier: "Cat B - Old" }],
+        },
+        "memorial stadium - ne": {
+          "9": [{ from: null, to: null, tier: "Cat Z - Nebraska" }],
+        },
+      },
+    };
+
+    const overlay = VI.applyOverlay(base, VI.parse([
+      "venue,section,row_from,row_to,tier,sort",
+      "Michigan Stadium,1,A,M,Cat A - New Front,0",
+      "Michigan Stadium,1,N,Z,Cat A1 - New Rear,1",
+      "The Big House,3,,,Cat C - Via Alias,",
+      "Memorial Stadium,10,,,Cat Y - Via Base Name,",
+    ].join("\n")).rows);
+
+    eq(overlay.sections["michigan stadium"]["1"].length, 2,
+       "an imported section REPLACES the shipped rules rather than adding to them");
+    eq(overlay.sections["michigan stadium"]["1"][0].tier, "Cat A - New Front",
+       "the imported rule wins");
+    eq(overlay.sections["michigan stadium"]["2"][0].tier, "Cat B - Old",
+       "sections not mentioned are left alone");
+    eq(overlay.sections["michigan stadium"]["3"][0].tier, "Cat C - Via Alias",
+       "an aliased venue name lands on the canonical key");
+    eq(overlay.sections["memorial stadium - ne"]["10"][0].tier, "Cat Y - Via Base Name",
+       "a bare name lands on its disambiguated key instead of making a new venue");
+    eq(Object.keys(overlay.sections).sort(), ["memorial stadium - ne", "michigan stadium"],
+       "no extra venue is created by the import");
+
+    // The base must be untouched, or clearing an import could not restore it.
+    eq(base.sections["michigan stadium"]["1"][0].tier, "Cat A - Old",
+       "applyOverlay does not mutate the shipped data");
+    eq(base.sections["memorial stadium - ne"]["10"], undefined,
+       "applyOverlay does not add to the shipped data");
+    eq(VI.applyOverlay(base, []) === base, true, "an empty import returns the base unchanged");
+
+    // Imported sorts are merged into the venue's ordering. A shipped category
+    // the import did not mention is KEPT — `tiers` is display-order metadata,
+    // and the tab strip is built from the categories the seat data actually
+    // contains, so a leftover entry for an unused category costs nothing.
+    const orderedTiers = overlay.tiers["michigan stadium"];
+    eq(orderedTiers.filter((t) => t.tier === "Cat A - New Front")[0].sort, 0,
+       "an imported category takes the sort it was given");
+    eq(orderedTiers.filter((t) => t.tier === "Cat A1 - New Rear")[0].sort, 1,
+       "a second imported category takes its own sort");
+    eq(orderedTiers.some((t) => t.tier === "Cat A - Old"), true,
+       "a shipped category the import did not mention is left in place");
+    eq(orderedTiers.map((t) => t.sort), [0, 0, 1],
+       "the ordering list stays sorted by sort value");
+
+    // The whole point: tierFor must see the imported rules.
+    const before = root.self.VENUE_TIER_DATA;
+    root.self.VENUE_TIER_DATA = overlay;
+    eq(V.tierFor("Michigan Stadium", "1", "C"), "Cat A - New Front",
+       "tierFor resolves an imported row band");
+    eq(V.tierFor("Michigan Stadium", "1", "Q"), "Cat A1 - New Rear",
+       "tierFor resolves the second imported band");
+    eq(V.tierFor("Memorial Stadium", "10", "5"), "Cat Y - Via Base Name",
+       "tierFor resolves an import reached through base-name matching");
+    root.self.VENUE_TIER_DATA = before;
+  } else {
+    lines.push("note  venue-import.js not loaded (node run) — section 5 skipped");
+  }
+
   // ═══ report ══════════════════════════════════════════════════════════════
   const total = passed + failed;
   const summary = failed

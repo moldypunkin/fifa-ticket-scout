@@ -133,6 +133,13 @@
         </svg>
         Download Logs
       </button>
+      <button id="importBtn" class="btn btn-secondary" title="Import venue categories from a CSV file">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 10V2m0 0L5 5m3-3l3 3"/>
+          <path d="M2 11v2a1 1 0 001 1h10a1 1 0 001-1v-2"/>
+        </svg>
+        Import Categories
+      </button>
       <button id="clearBtn" class="btn btn-danger">
         <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M2 4h12M5 4V3a1 1 0 011-1h4a1 1 0 011 1v1m2 0v9a1 1 0 01-1 1H4a1 1 0 01-1-1V4h10z"/>
@@ -140,6 +147,12 @@
         Clear Data
       </button>
     </div>
+
+    <!-- Result of the last category import, and the control to clear it. -->
+    <div id="importStatus" class="import-status"></div>
+    <!-- Kept out of the actions row: a bare file input cannot be styled to
+         match the buttons, so importBtn clicks this instead. -->
+    <input type="file" id="importFile" accept=".csv,text/csv" hidden>
 
     <!-- License / Plan -->
     <div class="section" id="licenseSection">
@@ -187,6 +200,7 @@
 
   <script src="venue-tiers.js"></script>
   <script src="tiers.js"></script>
+  <script src="venue-import.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

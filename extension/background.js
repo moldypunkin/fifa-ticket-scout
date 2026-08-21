@@ -5,7 +5,31 @@
 // scripts with no deps, so importScripts is safe at service-worker top level.
 // NOTE: VenueTiers is about SEAT tiers; the TIERS constant below is LICENSE
 // tiers. Different things.
-importScripts("venue-tiers.js", "tiers.js");
+importScripts("venue-tiers.js", "tiers.js", "venue-import.js");
+
+// The shipped mapping, before any user import overlays it.
+const SHIPPED_VENUE_TIER_DATA = self.VENUE_TIER_DATA;
+
+// Categories imported through the popup are layered on here too, so the `tier`
+// stamped onto seats at scan time agrees with what the popup renders. The
+// service worker restarts often, so this re-reads storage rather than caching.
+async function applyUserCategories() {
+  try {
+    const data = await chrome.storage.local.get("userVenueCategories");
+    const rows = (data && data.userVenueCategories && data.userVenueCategories.rows) || [];
+    self.VENUE_TIER_DATA = VenueImport.applyOverlay(SHIPPED_VENUE_TIER_DATA, rows);
+    return rows.length;
+  } catch (e) {
+    return 0;
+  }
+}
+
+// Re-apply when the popup imports or clears, without waiting for a restart.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.userVenueCategories) applyUserCategories();
+});
+
+applyUserCategories();
 
 // Say whether a scan picked up a curated venue mapping or fell back to the
 // section-text heuristic. Falling back is silent otherwise — the tiers still
@@ -22,6 +46,67 @@ function logTierMapping(venueName) {
                 `section heuristic. Add an alias to tools/fifa_venue_aliases.json ` +
                 `if this venue is curated in TicketPortal under another name.`);
   }
+}
+
+// ─── Log relay ────────────────────────────────────────────────────────────
+// injected.js already mirrors its console output into chrome.storage via
+// content.js, so Download Logs shows the page side. The service worker writes
+// only to its own console (chrome://extensions -> "service worker"), which is
+// a place nobody thinks to look — so a parse that rejects a payload looks
+// exactly like a capture that never happened. bgLog puts both sides in one
+// file. Batched: a get/set per line would race with itself.
+const MAX_LOG_LINES = 1000;
+let bgPendingLogs = [];
+let bgLogTimer = null;
+
+function bgFlushLogs() {
+  bgLogTimer = null;
+  if (!bgPendingLogs.length) return;
+  const batch = bgPendingLogs;
+  bgPendingLogs = [];
+  chrome.storage.local.get("extensionLogs", (data) => {
+    if (chrome.runtime.lastError) return;
+    let logs = (data?.extensionLogs || []).concat(batch);
+    if (logs.length > MAX_LOG_LINES) logs = logs.slice(-MAX_LOG_LINES);
+    chrome.storage.local.set({ extensionLogs: logs });
+  });
+}
+
+function bgLog(...args) {
+  const msg = args.map((a) => {
+    if (typeof a === "object" && a !== null) {
+      try { return JSON.stringify(a); } catch { return String(a); }
+    }
+    return String(a);
+  }).join(" ");
+  console.log(msg);
+  bgPendingLogs.push(`[${new Date().toISOString()}] ${msg}`);
+  if (bgPendingLogs.length >= 50) {
+    clearTimeout(bgLogTimer);
+    bgFlushLogs();
+  } else if (!bgLogTimer) {
+    bgLogTimer = setTimeout(bgFlushLogs, 1000);
+  }
+}
+
+// A compact description of an unknown payload, for the log. Names the shape
+// without dumping tens of thousands of rows into storage.
+function describeShape(v, depth) {
+  if (v === null) return "null";
+  if (Array.isArray(v)) {
+    const inner = v.length && depth > 0 ? describeShape(v[0], depth - 1) : "";
+    return `array(${v.length}${inner ? " of " + inner : ""})`;
+  }
+  if (typeof v === "object") {
+    const keys = Object.keys(v);
+    const shown = keys.slice(0, 8);
+    if (depth <= 0) {
+      return `{${shown.join(",")}${keys.length > 8 ? ",…" : ""}}`;
+    }
+    const parts = shown.map((k) => `${k}:${describeShape(v[k], depth - 1)}`);
+    return `{${parts.join(",")}${keys.length > 8 ? ",…" : ""}}`;
+  }
+  return typeof v;
 }
 
 // --- Site discrimination ---
@@ -580,14 +665,43 @@ async function processApiResponse(url, body, tabId, eventInfo) {
     }
   }
 
-  // Evenue seat availability — captured passively.
-  if (site === "evenue" && url.includes("/pac-api/seat-availability/") && Array.isArray(body)) {
-    const m = url.match(/event-id\/([^/?]+)/);
-    // "977:F26:02" -> "F26:02"; the leading segment is the venue/distributor.
-    const eventId = m ? decodeURIComponent(m[1]).split(":").slice(-2).join(":") : "";
+  // Evenue seat availability — captured passively. Matched on the payload
+  // shape rather than an exact path: the endpoint was confirmed on one
+  // school's instance and Paciolan builds differ between schools, so pinning
+  // the full path made a near-miss look like an event with no seats.
+  if (site === "evenue" && url.includes("/pac-api/") && Array.isArray(body)) {
+    const eventId = evenueEventIdFromUrl(url);
     if (eventId) {
       await enforceGameLimit(`${site}:${eventId}`);
       await saveEvenueSeats(eventId, body, tabId, site, eventInfo);
+    } else {
+      bgLog(`[background] Evenue: array payload on ${url.split("?")[0]} but no ` +
+        `event id in the url — add its shape to evenueEventIdFromUrl()`);
+    }
+  } else if (site === "evenue" && url.includes("/pac-api/")
+             && evenueFindEventDetails(body).length) {
+    await saveEvenuePriceLevels(evenueFindEventDetails(body), tabId, site, eventInfo);
+  } else if (site === "evenue" && url.includes("/pac-api/")) {
+    // Not an array, so not the seat payload. Name it once per path: on a school
+    // whose inventory arrives some other way this is the only breadcrumb, but
+    // Paciolan's page makes ~18 GraphQL calls to /pac-api/consumer/gql and
+    // logging each would bury everything else.
+    // Dedupe on path + shape, not path alone: Paciolan sends every GraphQL
+    // query to the same /pac-api/consumer/gql, so keying on the path would
+    // report the first operation and hide the rest — including, possibly, the
+    // price-level table a school uses instead of an inline price.
+    const path = url.split("?")[0];
+    // "TIERED FEES" is the per-ticket fee table. It arrives as a string, so the
+    // shape dump only ever says "string" — print the value itself, once, so the
+    // provisional FEE_FLAT_BY_SITE constant in popup.js can be replaced by the
+    // real per-event figure.
+    evenueLogFeeTable(body);
+    const shape = describeShape(body, 5);
+    const seen = path + " " + shape;
+    if (!evenueIgnoredPaths.has(seen)) {
+      evenueIgnoredPaths.add(seen);
+      bgLog(`[background] Evenue: ignoring ${path} -> ${shape} ` +
+        `(not the seat array; repeats of this shape stay quiet)`);
     }
   }
 
@@ -755,10 +869,17 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
   // when the page actually yielded a name — a later scan that failed to read
   // the DOM shouldn't wipe a good value.
   if (eventInfo && eventInfo.name) {
+    // Merge rather than replace. The DOM read can come back with a name but no
+    // date or venue — that is exactly what happens after an in-page navigation,
+    // when stale JSON-LD is skipped and the name falls back to document.title.
+    // Overwriting outright would null the venue and silently drop this event
+    // back to heuristic tiers. gameKey is per-event, so what is already stored
+    // belongs to this same event and is safe to keep.
+    const prev = games[gameKey].match || {};
     games[gameKey].match = {
       name: eventInfo.name,
-      date: eventInfo.date || null,
-      venue: eventInfo.venue || null,
+      date: eventInfo.date || prev.date || null,
+      venue: eventInfo.venue || prev.venue || null,
       currency: "USD",
       performanceId: eventId,
     };
@@ -869,10 +990,17 @@ async function saveSeatGeekSeats(eventId, body, tabId, site, eventInfo) {
   if (!games[gameKey]) games[gameKey] = emptyGame();
 
   if (eventInfo && eventInfo.name) {
+    // Merge rather than replace. The DOM read can come back with a name but no
+    // date or venue — that is exactly what happens after an in-page navigation,
+    // when stale JSON-LD is skipped and the name falls back to document.title.
+    // Overwriting outright would null the venue and silently drop this event
+    // back to heuristic tiers. gameKey is per-event, so what is already stored
+    // belongs to this same event and is safe to keep.
+    const prev = games[gameKey].match || {};
     games[gameKey].match = {
       name: eventInfo.name,
-      date: eventInfo.date || null,
-      venue: eventInfo.venue || null,
+      date: eventInfo.date || prev.date || null,
+      venue: eventInfo.venue || prev.venue || null,
       currency: body.currency || "USD",
       performanceId: eventId,
     };
@@ -1020,10 +1148,17 @@ async function saveStubHubSeats(eventId, body, tabId, site, eventInfo) {
   if (!games[gameKey]) games[gameKey] = emptyGame();
 
   if (eventInfo && eventInfo.name) {
+    // Merge rather than replace. The DOM read can come back with a name but no
+    // date or venue — that is exactly what happens after an in-page navigation,
+    // when stale JSON-LD is skipped and the name falls back to document.title.
+    // Overwriting outright would null the venue and silently drop this event
+    // back to heuristic tiers. gameKey is per-event, so what is already stored
+    // belongs to this same event and is safe to keep.
+    const prev = games[gameKey].match || {};
     games[gameKey].match = {
       name: eventInfo.name,
-      date: eventInfo.date || null,
-      venue: eventInfo.venue || null,
+      date: eventInfo.date || prev.date || null,
+      venue: eventInfo.venue || prev.venue || null,
       currency: (body.items[0] && body.items[0].buyerCurrencyCode) || "USD",
       performanceId: eventId,
     };
@@ -1089,6 +1224,236 @@ async function saveStubHubSeats(eventId, body, tabId, site, eventInfo) {
   await chrome.storage.local.set({ games });
 }
 
+// The event id out of a Paciolan api url. Several shapes because schools run
+// different builds; all normalise to the "<season>:<code>" the adapter and the
+// popup both use, dropping any leading venue/distributor segment
+// ("977:F26:02" -> "F26:02").
+function evenueEventIdFromUrl(url) {
+  const path = String(url || "");
+
+  const tagged = path.match(/event-id\/([^/?]+)/)
+    || path.match(/[?&]event-?[iI]d=([^&]+)/);
+  if (tagged) {
+    return decodeURIComponent(tagged[1]).split(":").slice(-2).join(":");
+  }
+
+  // Colon-joined id sitting bare in the path, url-encoded or not.
+  const bare = decodeURIComponent(path).match(/\/(\w+:\w+(?::\w+)?)(?:[/?]|$)/);
+  if (bare) return bare[1].split(":").slice(-2).join(":");
+
+  return "";
+}
+
+// Is this row's AVAILABLE value a yes?
+//
+// Numeric values keep the original rule exactly — only 1 counts — so this
+// cannot change the school this was built against. The string tokens are for
+// builds that spell the flag out; treating "Y" as NaN made every seat read as
+// unavailable, which is indistinguishable from a sold-out event.
+const EVENUE_AVAILABLE_TOKENS = new Set(["Y", "YES", "TRUE", "T", "A", "AVAILABLE", "O", "OPEN"]);
+
+function evenueIsAvailable(value) {
+  if (value === true) return true;
+  const s = String(value == null ? "" : value).trim().toUpperCase();
+  if (!s) return false;
+  if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s) === 1;
+  return EVENUE_AVAILABLE_TOKENS.has(s);
+}
+
+// ─── Evenue price levels ──────────────────────────────────────────────────
+// Some Paciolan builds leave SLP_PRICE null on every seat row and carry price
+// in a separate GraphQL payload keyed by price level — Virginia Tech does,
+// Kansas does not. `PRICELEVELCD` on the seat row is the join key.
+//
+// The container is data.discovery.eventDetailMPT[]. Its inner shape is not
+// documented anywhere we can see, so the walk below accepts whatever it finds
+// and the raw shape is logged when nothing usable comes out.
+
+// Seat payloads held in memory so prices arriving AFTER the seats can still be
+// applied. Best-effort: the service worker may be evicted, in which case a
+// reload re-sends both. Keyed by gameKey, one entry each, so a long session
+// cannot grow this without bound.
+const evenuePendingSeats = new Map();
+
+// Collect priceLevel -> price from an arbitrarily nested structure. Prices are
+// whatever positive numbers sit alongside a price-level-looking key.
+function evenueCollectPrices(node, out, depth) {
+  if (!node || depth > 6) return;
+  if (Array.isArray(node)) {
+    node.forEach((n) => evenueCollectPrices(n, out, depth + 1));
+    return;
+  }
+  if (typeof node !== "object") return;
+
+  // Shape A: a row carrying both the level and the price as fields.
+  const levelField = ["PRICELEVELCD", "PRICE_LEVEL", "PL", "PRICELEVEL", "PLCD"]
+    .find((k) => node[k] !== undefined && node[k] !== null);
+  if (levelField) {
+    const level = String(node[levelField]).trim();
+    const priceField = ["PRICE", "AMOUNT", "AMT", "PRICE_AMT", "TICKET_PRICE", "PT_PRICE"]
+      .find((k) => isFinite(Number(node[k])) && Number(node[k]) > 0);
+    if (level && priceField) {
+      const n = Number(node[priceField]);
+      if (!out.has(level) || n < out.get(level)) out.set(level, n);
+      return;
+    }
+  }
+
+  // Shape B: keyed by price level -> price, or -> { priceType: price }.
+  Object.keys(node).forEach((key) => {
+    const value = node[key];
+    const level = String(key).trim();
+    // Paciolan price-level codes are short — "1", "12", "A", "AA". Anything
+    // longer is a container name, and treating one as a level both invents a
+    // bogus level and stops the walk before the real ones.
+    const looksLikeLevel = /^[A-Za-z0-9]{1,3}$/.test(level);
+    if (looksLikeLevel && isFinite(Number(value)) && Number(value) > 0) {
+      const n = Number(value);
+      if (!out.has(level) || n < out.get(level)) out.set(level, n);
+      return;
+    }
+    if (looksLikeLevel && value && typeof value === "object" && !Array.isArray(value)) {
+      // price-type map: take the cheapest price offered at this level. Every
+      // value must be a price — a mixed object is a container, not a level.
+      const inner = Object.keys(value);
+      const nums = inner.map((k) => Number(value[k])).filter((n) => isFinite(n) && n > 0);
+      if (inner.length && nums.length === inner.length) {
+        const n = Math.min.apply(null, nums);
+        if (!out.has(level) || n < out.get(level)) out.set(level, n);
+        return;
+      }
+    }
+    evenueCollectPrices(value, out, depth + 1);
+  });
+}
+
+// Paciolan quotes some fields in cents and others in dollars, and getting it
+// wrong is a 100x error on screen. Decide once for the whole map, from the
+// shape of the numbers, and say which way it went.
+function evenuePriceScale(values) {
+  if (!values.length) return { divisor: 1, note: "no values" };
+  const anyDecimal = values.some((n) => !Number.isInteger(n));
+  if (anyDecimal) return { divisor: 1, note: "decimals present -> dollars" };
+  const max = Math.max.apply(null, values);
+  if (max >= 2000) return { divisor: 100, note: `max ${max} >= 2000 -> cents` };
+  return { divisor: 1, note: `max ${max} < 2000 -> dollars` };
+}
+
+// Find the price-carrying rows anywhere in a GraphQL body.
+//
+// Matched on CONTENT, not on a path. Paciolan names its GraphQL result keys
+// with a space in them — the container is literally `data["discovery
+// eventDetailMPT"]`, not `data.discovery.eventDetailMPT` — so walking a fixed
+// path silently found nothing and the payload was logged as unrecognised.
+function evenueFindEventDetails(body) {
+  const found = [];
+  const seen = new Set();
+
+  const carriesPrices = (e) => e && typeof e === "object" && !Array.isArray(e)
+    && (e.PL_PT_PRICES !== undefined
+        || (e.SEASONCD !== undefined && e.ITEMCD !== undefined));
+
+  (function walk(node, depth) {
+    if (!node || typeof node !== "object" || depth > 6) return;
+    if (Array.isArray(node)) {
+      if (node.length && node.some(carriesPrices)) {
+        node.forEach((e) => {
+          if (carriesPrices(e) && !seen.has(e)) { seen.add(e); found.push(e); }
+        });
+        return;
+      }
+      node.forEach((n) => walk(n, depth + 1));
+      return;
+    }
+    if (carriesPrices(node) && !seen.has(node)) { seen.add(node); found.push(node); return; }
+    Object.keys(node).forEach((k) => walk(node[k], depth + 1));
+  })(body, 0);
+
+  return found;
+}
+
+// eventId out of the GraphQL payload itself: "F26" + "01" -> "F26:01", the
+// same id the seat url and the adapter produce.
+function evenueEventIdFromDetail(detail) {
+  const season = detail && (detail.SEASONCD || detail.seasoncd);
+  const item = detail && (detail.ITEMCD || detail.itemcd);
+  if (!season || !item) return "";
+  return `${String(season).trim()}:${String(item).trim()}`;
+}
+
+// Print any fee-looking field once, whatever it is nested under. Paciolan keys
+// its GraphQL results with spaces ("maps eventMap"), so this matches on the key
+// name containing "FEE" rather than on a path.
+const evenueFeeSeen = new Set();
+
+function evenueLogFeeTable(node, depth) {
+  if (!node || typeof node !== "object" || (depth || 0) > 6) return;
+  if (Array.isArray(node)) {
+    node.forEach((n) => evenueLogFeeTable(n, (depth || 0) + 1));
+    return;
+  }
+  Object.keys(node).forEach((key) => {
+    const value = node[key];
+    if (/FEE/i.test(key) && (typeof value === "string" || typeof value === "number")) {
+      const line = `${key} = ${String(value).slice(0, 800)}`;
+      if (!evenueFeeSeen.has(line)) {
+        evenueFeeSeen.add(line);
+        bgLog(`[background] Evenue: fee field ${line}`);
+      }
+      return;
+    }
+    evenueLogFeeTable(value, (depth || 0) + 1);
+  });
+}
+
+// Paths already reported as "not the seat array", so the log names each once.
+const evenueIgnoredPaths = new Set();
+
+async function saveEvenuePriceLevels(details, tabId, site, eventInfo) {
+  for (const detail of details) {
+    const eventId = evenueEventIdFromDetail(detail);
+    if (!eventId) continue;
+
+    const collected = new Map();
+    evenueCollectPrices(detail.PL_PT_PRICES !== undefined ? detail.PL_PT_PRICES : detail,
+                        collected, 0);
+    if (!collected.size) {
+      bgLog(`[background] Evenue: ${eventId} price payload yielded no levels — ` +
+        `shape was ${describeShape(detail.PL_PT_PRICES, 4)}`);
+      continue;
+    }
+
+    const scale = evenuePriceScale([...collected.values()]);
+    const levels = {};
+    collected.forEach((n, level) => {
+      // Storage is thousandths of a dollar, matching centsToUSD() in the popup.
+      levels[level] = Math.round((n / scale.divisor) * 1000);
+    });
+
+    const gameKey = `${site}:${eventId}`;
+    await enforceGameLimit(gameKey);
+    const data = await getStorage();
+    const games = data.games || {};
+    if (!games[gameKey]) games[gameKey] = emptyGame();
+    games[gameKey].priceLevels = Object.assign({}, games[gameKey].priceLevels, levels);
+    games[gameKey].site = site;
+    await chrome.storage.local.set({ games });
+
+    const preview = Object.keys(levels).sort().slice(0, 8)
+      .map((k) => `${k}=$${(levels[k] / 1000).toFixed(2)}`).join(" ");
+    bgLog(`[background] Evenue: ${eventId} price levels (${Object.keys(levels).length}) ` +
+      `[${scale.note}] ${preview}`);
+
+    // Seats may already have arrived and been parked for want of a price.
+    const pending = evenuePendingSeats.get(gameKey);
+    if (pending) {
+      evenuePendingSeats.delete(gameKey);
+      bgLog(`[background] Evenue: re-parsing held seat payload for ${eventId} now prices are known`);
+      await saveEvenueSeats(eventId, pending.body, pending.tabId, site, pending.eventInfo);
+    }
+  }
+}
+
 // ─── Evenue seat availability ─────────────────────────────────────────────
 // The payload is [rows, headerNames] — 49,233 rows for KU event F26:02, each
 // a positional array described by the trailing header row:
@@ -1131,14 +1496,30 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
   const rows = split.rows;
   const headers = split.headers;
   if (!rows || !headers) {
-    console.log("[background] Evenue: payload missing rows or header row — not parsing");
+    // Name what arrived. The header row is found by sniffing for known column
+    // names, so a school whose columns are named differently lands here and
+    // the shape is the only way to tell that from an empty event.
+    bgLog(`[background] Evenue: could not find rows + header row in the payload. ` +
+      `Got ${describeShape(body, 2)}; elements: ` +
+      (Array.isArray(body) ? body.map((e) => describeShape(e, 1)).join(" | ") : "n/a") +
+      `. rows=${rows ? "found" : "MISSING"} headers=${headers ? "found" : "MISSING"}`);
+    if (Array.isArray(body)) {
+      body.forEach((e, i) => {
+        if (Array.isArray(e) && e.length && e.every((v) => typeof v === "string")) {
+          bgLog(`[background] Evenue: element ${i} looks like column names: ` +
+            e.slice(0, 20).join(", ") + (e.length > 20 ? ` …(${e.length} total)` : ""));
+        }
+      });
+    }
     return;
   }
 
   const idx = evenueColumnIndex(headers);
   for (const required of ["LEVELSECTIONCD", "ROWCD", "SEATCD", "SLP_PRICE", "AVAILABLE"]) {
     if (idx[required] === undefined) {
-      console.log(`[background] Evenue: header row has no ${required} — not parsing`);
+      bgLog(`[background] Evenue: header row has no ${required} — not parsing. ` +
+        `Columns present: ${Object.keys(idx).slice(0, 30).join(", ")}` +
+        `${Object.keys(idx).length > 30 ? ` …(${Object.keys(idx).length} total)` : ""}`);
       return;
     }
   }
@@ -1149,10 +1530,17 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
   if (!games[gameKey]) games[gameKey] = emptyGame();
 
   if (eventInfo && eventInfo.name) {
+    // Merge rather than replace. The DOM read can come back with a name but no
+    // date or venue — that is exactly what happens after an in-page navigation,
+    // when stale JSON-LD is skipped and the name falls back to document.title.
+    // Overwriting outright would null the venue and silently drop this event
+    // back to heuristic tiers. gameKey is per-event, so what is already stored
+    // belongs to this same event and is safe to keep.
+    const prev = games[gameKey].match || {};
     games[gameKey].match = {
       name: eventInfo.name,
-      date: eventInfo.date || null,
-      venue: eventInfo.venue || null,
+      date: eventInfo.date || prev.date || null,
+      venue: eventInfo.venue || prev.venue || null,
       currency: "USD",
       performanceId: eventId,
     };
@@ -1167,20 +1555,66 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
   const seats = {};
   let unavailable = 0;
   let missingPrice = 0;
+  let fromPriceLevel = 0;
+  const priceLevels = games[gameKey].priceLevels || {};
+
+  // Sampled only to explain a zero-seat result: the counters say how many rows
+  // were dropped but not why, and "every available seat had no price" is a
+  // schema difference between schools, not an empty event.
+  const availableValues = new Map();
+  const pricelessSamples = [];
+  const statusValues = new Map();
+  let withPrice = 0;
+  const pricedSamples = [];
+  const pricedByAvailable = new Map();
 
   try {
     for (const row of rows) {
       if (!Array.isArray(row)) continue;
 
+      const availRaw = row[idx.AVAILABLE];
+      if (availableValues.size < 12) {
+        const k = JSON.stringify(availRaw);
+        availableValues.set(k, (availableValues.get(k) || 0) + 1);
+      }
+      if (idx.SEATSTATUS !== undefined && statusValues.size < 16) {
+        const k = JSON.stringify(row[idx.SEATSTATUS]);
+        statusValues.set(k, (statusValues.get(k) || 0) + 1);
+      }
+      // Which rows carry a price at all, regardless of the availability flag.
+      // If sellable seats sit on AVAILABLE=0, this is what shows it.
+      const rawPrice = row[idx.SLP_PRICE];
+      if (rawPrice !== null && rawPrice !== undefined && rawPrice !== ""
+          && isFinite(Number(rawPrice)) && Number(rawPrice) > 0) {
+        withPrice++;
+        const k = JSON.stringify(availRaw);
+        pricedByAvailable.set(k, (pricedByAvailable.get(k) || 0) + 1);
+        if (pricedSamples.length < 2) pricedSamples.push(row);
+      }
+
       // AVAILABLE is the authoritative flag; SEATSTATUS "O" agrees with it but
       // also carries hold codes we do not need to enumerate.
-      if (Number(row[idx.AVAILABLE]) !== 1) { unavailable++; continue; }
+      if (!evenueIsAvailable(availRaw)) { unavailable++; continue; }
       if (idx.HIDDEN !== undefined && Number(row[idx.HIDDEN]) === 1) { unavailable++; continue; }
 
       const cents = Number(row[idx.SLP_PRICE]);
-      if (!isFinite(cents) || cents <= 0) { missingPrice++; continue; }
-      // SLP_PRICE is cents; storage is thousandths of a dollar.
-      const price = Math.round((cents / 100) * 1000);
+      let price = null;
+      if (isFinite(cents) && cents > 0) {
+        // SLP_PRICE is cents; storage is thousandths of a dollar.
+        price = Math.round((cents / 100) * 1000);
+      } else if (idx.PRICELEVELCD !== undefined) {
+        // No inline price on this build — join the GraphQL price-level table.
+        const level = String(row[idx.PRICELEVELCD] == null ? "" : row[idx.PRICELEVELCD]).trim();
+        if (level && priceLevels[level] != null) {
+          price = priceLevels[level];
+          fromPriceLevel++;
+        }
+      }
+      if (price == null) {
+        missingPrice++;
+        if (pricelessSamples.length < 2) pricelessSamples.push(row);
+        continue;
+      }
 
       // "KU:101" -> "101". The prefix is the level, repeated on every row.
       const rawSection = String(row[idx.LEVELSECTIONCD] || "");
@@ -1208,9 +1642,47 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
   }
 
   const total = Object.keys(seats).length;
-  console.log(`[background] Evenue: ${total} available seats from ${rows.length} rows` +
+  if (rows.length && (!total || missingPrice)) {
+    const names = Object.keys(idx);
+    bgLog(`[background] Evenue: ${total ? "some rows dropped" : "no seats survived"}. ` +
+      `Columns (${names.length}): ` + names.join(", "));
+    bgLog(`[background] Evenue: AVAILABLE values seen: ` +
+      [...availableValues.entries()].map(([v, n]) => `${v}×${n}`).join(", ") +
+      ` (only 1 counts as available)`);
+    if (idx.SEATSTATUS !== undefined) {
+      bgLog(`[background] Evenue: SEATSTATUS values seen: ` +
+        [...statusValues.entries()].map(([v, n]) => `${v}×${n}`).join(", "));
+    }
+    bgLog(`[background] Evenue: rows carrying a usable SLP_PRICE: ${withPrice}` +
+      (withPrice
+        ? ` — by AVAILABLE: ` + [...pricedByAvailable.entries()].map(([v, n]) => `${v}×${n}`).join(", ")
+        : ` — the price is NOT in this payload; PRICELEVELCD is the join key`));
+    pricedSamples.forEach((row, i) => {
+      const pairs = names.map((nm) => `${nm}=${JSON.stringify(row[idx[nm]])}`).join(" ");
+      bgLog(`[background] Evenue: priced row ${i + 1}: ` + pairs.slice(0, 1200));
+    });
+    pricelessSamples.forEach((row, i) => {
+      const pairs = names
+        .map((nm) => `${nm}=${JSON.stringify(row[idx[nm]])}`)
+        .join(" ");
+      bgLog(`[background] Evenue: available-but-priceless row ${i + 1}: ` +
+        pairs.slice(0, 1200));
+    });
+  }
+
+  // Seats arrived before the price table. Hold the payload so the GraphQL
+  // response can trigger a re-parse instead of the user reloading; on this
+  // build the prices normally come first, but the order is not guaranteed.
+  if (!total && missingPrice && !Object.keys(priceLevels).length) {
+    evenuePendingSeats.set(gameKey, { body, tabId, eventInfo });
+    bgLog(`[background] Evenue: holding ${rows.length}-row payload for ${eventId} ` +
+      `until the price-level table arrives`);
+  }
+
+  bgLog(`[background] Evenue: ${total} available seats from ${rows.length} rows` +
     (unavailable ? `, ${unavailable} unavailable/hidden` : "") +
-    (missingPrice ? `, ${missingPrice} had no price` : ""));
+    (missingPrice ? `, ${missingPrice} had no price` : "") +
+    (fromPriceLevel ? `, ${fromPriceLevel} priced from the level table` : ""));
 
   games[gameKey].seats = { ...games[gameKey].seats, ...seats };
   games[gameKey].site = site;
@@ -1278,10 +1750,17 @@ async function saveTickPickSeats(eventId, body, tabId, site, eventInfo) {
   if (!games[gameKey]) games[gameKey] = emptyGame();
 
   if (eventInfo && eventInfo.name) {
+    // Merge rather than replace. The DOM read can come back with a name but no
+    // date or venue — that is exactly what happens after an in-page navigation,
+    // when stale JSON-LD is skipped and the name falls back to document.title.
+    // Overwriting outright would null the venue and silently drop this event
+    // back to heuristic tiers. gameKey is per-event, so what is already stored
+    // belongs to this same event and is safe to keep.
+    const prev = games[gameKey].match || {};
     games[gameKey].match = {
       name: eventInfo.name,
-      date: eventInfo.date || null,
-      venue: eventInfo.venue || null,
+      date: eventInfo.date || prev.date || null,
+      venue: eventInfo.venue || prev.venue || null,
       currency: "USD",
       performanceId: eventId,
     };

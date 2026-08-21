@@ -2638,3 +2638,74 @@ body {
   color: var(--fifa-purple);
   opacity: 0.85;
 }
+
+/* --- Venue category import --- */
+
+.import-status:empty {
+  display: none;
+}
+
+.import-status {
+  padding: 0 12px 10px;
+}
+
+.import-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.import-status-text {
+  font-size: 11px;
+  color: var(--gray-600);
+}
+
+.import-status-venues {
+  font-size: 10px;
+  color: var(--gray-500);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-clear {
+  margin-left: auto;
+  flex-shrink: 0;
+  border: 1px solid var(--border-dark);
+  background: var(--white);
+  color: var(--gray-600);
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.import-clear:hover {
+  color: var(--danger, #b3261e);
+  border-color: var(--danger, #b3261e);
+}
+
+/* Validation failures are multi-line and worth reading, so the box keeps the
+   line breaks and scrolls rather than truncating. */
+.import-msg {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--gray-700);
+  background: var(--gray-50);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 9px;
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.import-msg-error {
+  color: var(--danger, #b3261e);
+  background: #fdf3f2;
+  border-color: #f3d3d0;
+}

@@ -1,0 +1,88 @@
+# Venue category import — sample file
+#
+# Copy this to tools/venue_categories.csv and edit, or import it with:
+#     python tools/build_venue_tiers.py --import path/to/your_file.csv
+# then rebuild:
+#     python tools/build_venue_tiers.py
+#
+# This file is a SOURCE, not output. It is merged on top of the TicketPortal
+# export every build, so a category set here survives re-running the export and
+# beats whatever the database says for the same venue and section.
+#
+# Lines starting with # are ignored. Blank lines are ignored. Column order is
+# taken from the header row below, so you may reorder or omit optional columns.
+#
+# COLUMNS
+#   venue     required. The venue name as the ticket site writes it. Case and
+#             extra spaces do not matter. City suffixes are tolerated at match
+#             time ("Lane Stadium" matches "Lane Stadium, Blacksburg, VA"), so
+#             the plain name is usually the best thing to put here.
+#   section   the section code. "Section 101", "SEC 101" and "101" are the same
+#             thing. LEAVE BLANK to set a category's display order without
+#             mapping any section (see the ordering rows at the bottom).
+#   row_from  optional. First row of a row band, inclusive.
+#   row_to    optional. Last row of a row band, inclusive.
+#             Leave BOTH blank to map the whole section to one category.
+#   tier      required. The category name shown on the popup tab.
+#   sort      optional. Display order for this category within this venue.
+#             Lower comes first. Only needs to appear once per category.
+#
+# CATEGORY NAMES
+#   A name containing " - " is abbreviated on the tab, with the full name on
+#   hover: "Cat A - Lower Sideline" shows as "Cat A". Tabs sort alphabetically
+#   on that short form, so "Cat A", "Cat A1", "Cat A2" stay together in order.
+#
+# ROW BANDS
+#   Bands are inclusive on both ends and may be numeric ("1" to "30") or
+#   lettered ("A" to "M", continuing "AA", "BB" for rows behind Z). Within one
+#   section every band must be the same type — mixing "5" and "E" makes the
+#   comparison meaningless and the build will reject it.
+#
+#   A section may hold several bands plus ONE catch-all row (both row columns
+#   blank), used for rows that fall outside every band. Two catch-alls on one
+#   section is an error, because only the first would ever apply.
+#
+# WHAT HAPPENS ON RE-IMPORT
+#   Importing a venue+section replaces every rule previously held for that
+#   section, so re-importing a corrected file updates cleanly rather than
+#   piling new rules on top of old ones. Sections you do not mention are left
+#   alone.
+#
+# ANYTHING NOT MAPPED
+#   Falls back to the section-text heuristic (Lower 100s / Club 200s / Upper
+#   300s / Floor / GA and so on). You only need rows for what you want named.
+
+venue,section,row_from,row_to,tier,sort
+
+# --- whole-section mappings -------------------------------------------------
+Lane Stadium,1,,,Cat A - Lower Sideline,0
+Lane Stadium,2,,,Cat A - Lower Sideline,
+Lane Stadium,3,,,Cat B - Lower Corner,1
+Lane Stadium,Section 4,,,Cat B - Lower Corner,
+Lane Stadium,5,,,Cat C - Lower Endzone,2
+
+# --- a section split by row -------------------------------------------------
+# Rows A through M are the good seats, N through Z sit behind them, and
+# anything else in the section (including unrankable row codes) falls to the
+# catch-all on the last line.
+Lane Stadium,20,A,M,Cat A - Lower Sideline,
+Lane Stadium,20,N,Z,Cat B - Lower Corner,
+Lane Stadium,20,,,Cat C - Lower Endzone,
+
+# --- a numeric row split ----------------------------------------------------
+Lane Stadium,21,1,20,Cat A - Lower Sideline,
+Lane Stadium,21,21,60,Cat D - Upper Sideline,3
+
+# --- another venue ----------------------------------------------------------
+# Whatever the site calls it. This one has no explicit sort, so its categories
+# fall back to alphabetical order on the tab strip.
+Memorial Stadium,101,,,Cat 1 - Sideline,
+Memorial Stadium,102,,,Cat 1 - Sideline,
+Memorial Stadium,201,,,Cat 2 - Club,
+
+# --- ordering-only rows -----------------------------------------------------
+# Blank section: sets where a category sits in the tab strip without mapping
+# anything. Useful when the mappings came from elsewhere and you only want to
+# fix the order.
+Memorial Stadium,,,,Cat 1 - Sideline,0
+Memorial Stadium,,,,Cat 2 - Club,1

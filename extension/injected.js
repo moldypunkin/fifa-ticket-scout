@@ -47,7 +47,12 @@
       : isStubHub
         ? ["/event/"]
         : isEvenue
-          ? ["/pac-api/seat-availability/"]
+          // Any Paciolan API call, not just seat-availability. The exact path
+          // was confirmed on one school's instance (Kansas, /event/F26/02) and
+          // other schools run different builds — a near-miss like
+          // "/pac-api/seat-availability-v2/" would otherwise be invisible.
+          // background.js still checks the payload shape before parsing.
+          ? ["/pac-api/"]
           : isTickPick
             ? ["/listings/internal/event-v2/"]
             : ["/seatmap/", "/performance/"];
@@ -122,25 +127,30 @@
     if (candidates.size >= MAX_CANDIDATES) return;
     const clean = String(url).split("?")[0];
     if (PROBE_SKIP.test(clean)) return;
-    const type = (response.headers && response.headers.get("content-type")) || "";
-    if (!type.includes("json")) return;
+    // Content type is recorded, not required. Evenue (Paciolan) is a legacy CGI
+    // platform whose inventory can arrive as server-rendered HTML, so a
+    // JSON-only filter would go blind on exactly the site most likely to need
+    // this. PROBE_SKIP already drops images, fonts and tiles.
+    const type = ((response.headers && response.headers.get("content-type")) || "")
+      .split(";")[0].trim() || "unknown";
     response.clone().text().then((t) => {
       if (!t || t.length < CANDIDATE_MIN_CHARS) return;
-      const prev = candidates.get(clean) || 0;
-      if (t.length > prev) candidates.set(clean, t.length);
+      const prev = candidates.get(clean);
+      if (!prev || t.length > prev.len) candidates.set(clean, { len: t.length, type: type });
     }).catch(() => {});
   }
 
   function reportCandidates() {
     if (!candidates.size) {
-      console.log(`[${SITE_TAG}] no JSON responses over ${CANDIDATE_MIN_CHARS} chars were seen ` +
-        `either — the page may be serving from cache; try a hard reload.`);
+      console.log(`[${SITE_TAG}] no responses over ${CANDIDATE_MIN_CHARS} chars were seen ` +
+        `either — the page may be serving from cache, or the seat map may load ` +
+        `only after you interact with it. Try a hard reload, then open the map.`);
       return;
     }
-    const ranked = [...candidates.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
-    console.log(`[${SITE_TAG}] largest JSON responses the page fetched (candidate endpoints):`);
-    ranked.forEach(([path, len], i) => {
-      console.log(`[${SITE_TAG}]   ${i + 1}. ${Math.round(len / 1024)}KB  ${path}`);
+    const ranked = [...candidates.entries()].sort((a, b) => b[1].len - a[1].len).slice(0, 10);
+    console.log(`[${SITE_TAG}] largest responses the page fetched (candidate endpoints):`);
+    ranked.forEach(([path, info], i) => {
+      console.log(`[${SITE_TAG}]   ${i + 1}. ${Math.round(info.len / 1024)}KB  ${info.type}  ${path}`);
     });
   }
 

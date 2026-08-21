@@ -84,6 +84,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Download logs
   onClick("logsBtn", downloadLogs);
+  initCategoryImport();
 
   // Clear data
   onClick("clearBtn", () => {
@@ -477,6 +478,10 @@ function siteFileTag(site) {
   const cleaned = String(site || "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "");
   return cleaned || "unknown-site";
 }
+
+// The shipped mapping, captured before any user import overlays it, so
+// repeated imports layer over the original rather than over each other.
+const SHIPPED_VENUE_TIER_DATA = self.VENUE_TIER_DATA;
 
 const SITE_BRANDS = {
   lms: "FIFA Ticket Scout",
@@ -1181,6 +1186,124 @@ function renderBlockTable(seats) {
 }
 
 
+// --- Venue category import ---
+//
+// Imported rows are stored raw in chrome.storage.local and layered over the
+// shipped venue-tiers.js at runtime by applyUserCategories(). The shipped file
+// is never written to, so rebuilding it from the TicketPortal export cannot
+// clobber an import, and clearing an import restores it exactly.
+
+function applyUserCategories(stored) {
+  const rows = (stored && stored.rows) || [];
+  // SHIPPED_VENUE_TIER_DATA is captured once, before any overlay, so repeated
+  // imports layer over the original rather than over each other.
+  self.VENUE_TIER_DATA = VenueImport.applyOverlay(SHIPPED_VENUE_TIER_DATA, rows);
+  return rows.length;
+}
+
+function renderImportStatus(stored) {
+  const el = document.getElementById("importStatus");
+  if (!el) return;
+  const rows = (stored && stored.rows) || [];
+  if (!rows.length) {
+    el.innerHTML = "";
+    return;
+  }
+  const s = VenueImport.summarize(rows);
+  const when = stored.importedAt ? new Date(stored.importedAt).toLocaleDateString() : "";
+  el.innerHTML = `
+    <div class="import-status-row">
+      <span class="import-status-text">
+        <strong>${s.sections}</strong> section${s.sections === 1 ? "" : "s"} across
+        <strong>${s.venues}</strong> venue${s.venues === 1 ? "" : "s"} imported${when ? " " + escapeHtml(when) : ""}
+        ${s.bands ? `&middot; ${s.bands} row band${s.bands === 1 ? "" : "s"}` : ""}
+      </span>
+      <button id="importClearBtn" class="import-clear" title="Remove imported categories and go back to the built-in mapping">Remove</button>
+    </div>
+    <div class="import-status-venues" title="${escapeHtml(s.venueNames.join(", "))}">${escapeHtml(s.venueNames.slice(0, 3).join(", "))}${s.venueNames.length > 3 ? ` +${s.venueNames.length - 3} more` : ""}</div>`;
+
+  const clear = document.getElementById("importClearBtn");
+  if (clear) {
+    clear.addEventListener("click", () => {
+      chrome.storage.local.remove("userVenueCategories", () => {
+        applyUserCategories(null);
+        renderImportStatus(null);
+        showImportMessage("Imported categories removed.", false);
+        loadData();
+      });
+    });
+  }
+}
+
+function showImportMessage(text, isError) {
+  const el = document.getElementById("importStatus");
+  if (!el) return;
+  const box = document.createElement("div");
+  box.className = "import-msg" + (isError ? " import-msg-error" : "");
+  box.textContent = text;
+  el.prepend(box);
+  if (!isError) setTimeout(() => box.remove(), 6000);
+}
+
+function initCategoryImport() {
+  const btn = document.getElementById("importBtn");
+  const input = document.getElementById("importFile");
+  if (!btn || !input) return;
+
+  btn.addEventListener("click", () => input.click());
+
+  input.addEventListener("change", () => {
+    const file = input.files && input.files[0];
+    // Reset immediately so re-picking the same file after an edit still fires.
+    input.value = "";
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onerror = () => showImportMessage("Could not read that file.", true);
+    reader.onload = () => {
+      const result = VenueImport.parse(String(reader.result || ""));
+
+      if (result.problems.length) {
+        // Refused whole, never half-applied: a silently dropped row is worse
+        // than a failed import.
+        const shown = result.problems.slice(0, 6).join("\n");
+        const more = result.problems.length > 6
+          ? `\n…and ${result.problems.length - 6} more` : "";
+        showImportMessage(`Not imported — ${result.problems.length} problem` +
+          `${result.problems.length === 1 ? "" : "s"}:\n${shown}${more}`, true);
+        return;
+      }
+      if (!result.rows.length) {
+        showImportMessage("That file has no category rows.", true);
+        return;
+      }
+
+      const stored = {
+        rows: result.rows,
+        importedAt: Date.now(),
+        sourceName: file.name,
+      };
+      chrome.storage.local.set({ userVenueCategories: stored }, () => {
+        applyUserCategories(stored);
+        renderImportStatus(stored);
+        const s = VenueImport.summarize(result.rows);
+        showImportMessage(`Imported ${s.sections} section` +
+          `${s.sections === 1 ? "" : "s"} across ${s.venues} venue` +
+          `${s.venues === 1 ? "" : "s"} from ${file.name}.`, false);
+        loadData();
+      });
+    };
+    reader.readAsText(file);
+  });
+
+  chrome.storage.local.get("userVenueCategories", (data) => {
+    const stored = data && data.userVenueCategories;
+    applyUserCategories(stored);
+    renderImportStatus(stored);
+    if (stored && stored.rows && stored.rows.length) loadData();
+  });
+}
+
 // --- Export CSV ---
 
 function exportCSV() {
@@ -1297,7 +1420,31 @@ function compareVersions(a, b) {
 // advertises all-in pricing so 1.0 is expected to be right, but that has not
 // been checked against a checkout page.
 const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0 };
-function centsToUSD(cents) { return cents / 1000 * (FEE_MULTIPLIER_BY_SITE[currentSite] ?? 1.15); }
+
+// Flat per-ticket fee, added after the multiplier. Percentage fees alone could
+// not describe Evenue: its price-level table quotes a base price and the site
+// adds a fixed per-ticket amount on top, so the whole board read low by the
+// same dollar figure at every price point.
+//
+// PROVISIONAL for evenue. 5.00 was measured against one Virginia Tech event,
+// not read from the source.
+//
+// The obvious source turned out to be a dead end: the GraphQL payload does
+// carry a "TIERED FEES" field, but on this event it came back as an empty
+// object, so the fee is not published anywhere the passive capture can see. It
+// is most likely a per-ticket service fee added at checkout.
+//
+// So this stays a constant until a second school proves it wrong, and it is a
+// per-SITE value being used for what is really a per-VENUE one. If it needs to
+// vary, scan_config (already fetched from Supabase) can carry it without a
+// release.
+const FEE_FLAT_BY_SITE = { resale: 0, lms: 0, ticketmaster: 0, seatgeek: 0, stubhub: 0, evenue: 5.00, tickpick: 0 };
+
+function centsToUSD(cents) {
+  const multiplier = FEE_MULTIPLIER_BY_SITE[currentSite] ?? 1.15;
+  const flat = FEE_FLAT_BY_SITE[currentSite] ?? 0;
+  return cents / 1000 * multiplier + flat;
+}
 
 function formatPrice(n) {
   if (n >= 1000) {
