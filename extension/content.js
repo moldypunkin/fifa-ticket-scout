@@ -24,6 +24,28 @@
 // every scan as games[<perfId>].seats[<seat_id>]. If a requested seat isn't
 // in the cache (user hasn't scanned this match recently), we silently skip
 // it and let the picker open without preselect — fail-soft, never break.
+
+// ─── Orphaned-context guard ───────────────────────────────────────────────
+// Reloading the extension leaves the OLD content script running in every tab
+// that was already open, with a dead chrome.runtime behind it. Every call then
+// throws "Extension context invalidated" — unhandled, once per captured
+// response, from inside a listener the page's own fetch chain runs through.
+//
+// There is nothing to recover: this script is orphaned until the tab reloads.
+// Go quiet instead of throwing, and say so once.
+let extensionGone = false;
+
+function extensionAlive() {
+  if (extensionGone) return false;
+  try {
+    if (chrome.runtime && chrome.runtime.id) return true;
+  } catch (e) { /* accessing runtime.id can itself throw */ }
+  extensionGone = true;
+  console.log("[FIFA Ticket Scout] Extension was reloaded — this tab's content " +
+    "script is orphaned and has stopped relaying. Refresh the page to reconnect.");
+  return false;
+}
+
 (function preselectSeatsFromUrl() {
   const SEAT_PICKER_RE = /\/secure\/selection\/event\/seat\/performance\/(\d+)/;
   const m = location.pathname.match(SEAT_PICKER_RE);
@@ -36,6 +58,7 @@
   const wantedSeatIds = raw.split(",").map((s) => s.trim()).filter(Boolean);
   if (wantedSeatIds.length === 0) return;
 
+  if (!extensionAlive()) return;
   chrome.storage.local.get("games", (data) => {
     try {
       const seats = data?.games?.[perfId]?.seats || {};
@@ -113,6 +136,7 @@ function flushLogs() {
   if (pendingLogs.length === 0) return;
   const batch = pendingLogs;
   pendingLogs = [];
+  if (!extensionAlive()) return;
   chrome.storage.local.get("extensionLogs", (data) => {
     if (chrome.runtime.lastError) return;
     let logs = (data?.extensionLogs || []).concat(batch);
@@ -132,12 +156,24 @@ function queueLog(line) {
   }
 }
 
+function safeSendMessage(message) {
+  if (!extensionAlive()) return;
+  try {
+    chrome.runtime.sendMessage(message, () => {
+      // Reading lastError is what suppresses "Unchecked runtime.lastError".
+      void chrome.runtime.lastError;
+    });
+  } catch (e) {
+    extensionGone = true;
+  }
+}
+
 // Listen for messages from injected code
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
 
   if (event.data?.type === "FIFA_TICKET_SCOUT") {
-    chrome.runtime.sendMessage({
+    safeSendMessage({
       type: "API_RESPONSE",
       url: event.data.url,
       body: event.data.body,
@@ -152,7 +188,7 @@ window.addEventListener("message", (event) => {
   }
 
   if (event.data?.type === "FIFA_TICKET_SCOUT_SCAN_PROGRESS") {
-    chrome.runtime.sendMessage({
+    safeSendMessage({
       type: "SCAN_PROGRESS",
       // Ticketmaster sends `eventId`; FIFA sends `performanceId`.
       performanceId: event.data.performanceId || event.data.eventId,
@@ -165,7 +201,7 @@ window.addEventListener("message", (event) => {
 
   if (event.data?.type === "FIFA_TICKET_SCOUT_SCAN_ERROR") {
     queueLog(`[${new Date().toISOString()}] [scan error] ${event.data.error}`);
-    chrome.runtime.sendMessage({
+    safeSendMessage({
       type: "SCAN_PROGRESS",
       performanceId: event.data.performanceId || event.data.eventId,
       status: "error",

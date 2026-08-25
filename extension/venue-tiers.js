@@ -43,6 +43,8 @@
       "bay area stadium": "levi's stadium",
       "bc place stadium": "bc place",
       "boston stadium": "gillette stadium",
+      "bryant denny stadium": "saban field at bryant-denny stadium",
+      "bryant-denny stadium": "saban field at bryant-denny stadium",
       "dallas stadium": "at&t stadium",
       "empower field at mile high": "empower field at mile high denver, co",
       "estadio bbva bancomer": "estadio bbva",

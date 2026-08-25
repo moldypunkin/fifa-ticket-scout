@@ -4,7 +4,7 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
-## August 20, 2026 — v2.6.1
+## August 20, 2026 — v2.6.2
 
 ### Marketplace Adapters: SeatGeek, StubHub, Evenue, TickPick
 
@@ -126,6 +126,131 @@ It resolves in three steps: a saved whole-section rule for the venue, then a row
 The tier lands in a **parallel `tier` field**; `category` is never overwritten, so nothing that reads FIFA categories changes. CSV export gains a `Tier` column, derived at export time for seats scanned before this shipped.
 
 Venue aliases fold FIFA's tournament names onto the sponsored names marketplaces use ("Dallas Stadium" → "at&t stadium"). These were seeded by hand and are flagged in-file as unverified against live venue strings.
+
+### Venue: Bryant-Denny
+
+`Bryant Denny Stadium`, as StubHub writes it, reached none of the 147 sections curated in TicketPortal under `saban field at bryant-denny stadium`. The hyphen and the "Saban Field at" prefix defeat both the alias table and base-name matching, so it fell to the section heuristic. Added as a verified alias, along with the hyphenated spelling.
+
+### Build Stamp
+
+Three separate debugging rounds in this project were spent analysing results produced by an extension that had not been reloaded. A stale build and a change that did not work look identical from a log, and the only way to tell them apart was to notice a line number had not moved.
+
+`tools/package.py` now writes a short hash of the shipped sources into `injected.js`, and every page logs it:
+
+```
+[FIFA Ticket Scout] Running on StubHub (passive capture) build 06a95c3c
+```
+
+The build prints the same value, so the question is answered by comparison rather than inference. The hash is taken with the stamp line itself blanked out, so unchanged content keeps the same stamp instead of the value chasing its own tail — verified stable across three consecutive rebuilds.
+
+### Fix: Popup Froze After About a Dozen Events
+
+`enforceGameLimit()` only bounded storage for free users; licensed ones kept every event they had ever opened. Each capture rewrites the whole `games` object, and a single StubHub sweep produces a dozen or more captures — so by roughly the thirteenth event the extension was serialising megabytes of seat data on every response and locking up. `chrome.storage.local` is a 10MB quota without the `unlimitedStorage` permission, which this extension does not request.
+
+Licensed users now keep the eight most recently scanned events; older ones are evicted, and the eviction is logged. The event being written always survives. Free-tier behaviour is unchanged.
+
+### Fix: "Extension context invalidated" Spam
+
+Reloading the extension leaves the OLD content script running in every tab that was already open, with a dead `chrome.runtime` behind it. Every relay call then threw `Extension context invalidated` — unhandled, once per captured response, from inside a listener the page's own fetch chain runs through.
+
+There is nothing to recover: the script is orphaned until the tab reloads. It now checks for a live context, goes quiet, and says so once, telling you to refresh. Every `chrome.runtime` and `chrome.storage` call in the relay goes through that check.
+
+The guard sits at the top of the file because the seat-preselect bridge runs at `document_start` and calls it: `let` is not hoisted, so declaring it further down would have been a temporal-dead-zone error on exactly the pages that use preselect.
+
+### Fix: StubHub Batches Returned a Shape Nobody Read
+
+The batch sweep worked on its first live run and was thrown away by the code that received it. Asked for ten listing ids, StubHub answered:
+
+```
+array(10 of {id, eventId, section:"833", sectionId, sectionMapName, sectionType, row:"25", seat:"19_20", …})
+```
+
+A BARE ARRAY of listing objects — where the page's own request answers with `{items:[...]}`. Both `listingsOf()` in the sweep and the routing in `background.js` read only `items`, so ten real listings counted as zero, the sweep stopped on its first batch, and the diagnostic reported the endpoint as refusing to answer. It had answered.
+
+Both now accept either shape. The diagnostic that caught this is the same one added the round before, which printed the array it was ignoring.
+
+The sweep also feeds itself. Every batch response carries listing ids of its own, so ids discovered along the way are queued and swept too — which is what reaches listings in sections the page never requested. On a live event the first response held ids for 280 listings out of 534 reported; the queue keeps going from there, stopping when it runs dry, when a batch fails, when three consecutive batches are all duplicates, or at the batch cap. If it stops with ids still queued it says how many.
+
+Batches also got bigger. The page asks ten at a time, but the endpoint takes a list: 351 ids is 36 round trips at ten and 15 at twenty-five, and fewer requests is gentler on a protected endpoint. If a larger batch comes back empty on the first try, it retries once at exactly the size the page itself uses before concluding anything — the endpoint may simply cap how many ids it accepts.
+
+### StubHub: Batch Diagnostics
+
+A batch that comes back with no listings now names the response shape before stopping. An accepted-but-empty reply and a rejected request are indistinguishable otherwise, and they point at different fixes.
+
+A batch of pure duplicates no longer aborts the sweep either: real listings that were already captured are not a failure, so it continues and gives up only after three consecutive duplicate batches.
+
+### StubHub: Fetch the Rest of the Inventory
+
+StubHub answers with a FILTERED subset: the query string on its inventory request carries sections, rows and quantity, so one capture is a slice of the event. Everything did arrive eventually, because `background.js` merges each capture into the stored seats — but only as fast as someone clicked around the page, which is not a usable way to see an event.
+
+**The endpoint is a detail fetch, not an inventory fetch.** A live request is:
+
+```
+POST /<slug>/event/160067961/?quantity=2
+{Method, EventId, Quantity, EstimatedFees, InstantDelivery, ListingIds}
+```
+
+`ListingIds` is the point: the page already holds all 591 listings and asks for ten at a time as you scroll, which is exactly why clicking around slowly fills the dashboard. So the field to remove is `ListingIds`, not `Quantity` — removing Quantity returned zero listings, and stripping the query string returned an HTML page rather than JSON. Both were measured, not guessed.
+
+All three body variants were then measured against a live event and all three returned zero listings: the endpoint refuses to answer without `ListingIds`. It cannot be widened.
+
+So the approach inverted. Hovering a section makes the page request that section's listings, and they appear in the dashboard — which means the page already holds every listing id and hands them over ten at a time. The ids are now harvested out of the response and requested in batches, doing programmatically what the hovering does by hand.
+
+Ids are matched by key name rather than a fixed path, since they may sit under `ListingIds`, `listingIds`, or as `id` on objects inside a listings array — and `venueConfigId` and the ids of listings already captured are excluded. Batches use the same size the page itself asked for, capped at 30, so a large event cannot become hundreds of requests at a protected endpoint. The sweep stops as soon as a batch adds nothing new or one fails.
+
+If the response turns out to carry no ids beyond the ten already captured, that is stated plainly: the full set lives in the page's own state rather than in any response, and reading it needs a different approach. The body variants remain as a fallback, and StubHub keeps ranking every response it sees.
+
+Alongside this, every StubHub response now has its top-level arrays counted with its size — `items=10, sections=42, seats=591` — so a full set hiding under a key nobody reads is visible rather than inferred.
+
+The filters ride in the POST body, not the query string. A live response echoes the request back as `{items, quantity, isInitialQuantityChange, sortBy, sections, venueConfigId, sectionIds, seats, …}`, so broadening by editing query parameters could never have worked. The request itself — method, url and body — is now remembered alongside the headers, and the first strategy re-posts it with the filter fields removed: sections, rows, zones, price bounds, and `quantity`, which narrows to listings seating exactly that many and is the main reason a first load shows a slice. `venueConfigId` and `sortBy` are left alone; they identify or order the event rather than narrow it.
+
+Query-string strategies remain for sites that filter that way: drop the filter parameters, widen a page-size parameter, then walk page indexes until a response adds nothing new. All stop as soon as the reported total is reached.
+
+The request is now logged in full — method, path, query string and body field names. `noteCapture()` strips the query for brevity, which had hidden exactly the evidence needed here. And `followUpDone` is set only once the request has been parsed: setting it earlier meant an early return disabled follow-up for the whole page while logging nothing, which is indistinguishable from the code never running.
+
+It runs in the page's own context with the headers the page itself sent, so it is that request repeated rather than a forged one. That matters — this endpoint sits behind Talos and DataDome, and building a request from scratch is precisely what the adapters were written to avoid.
+
+Totals are discovered rather than assumed: the largest number under a total-looking key at any depth, explicitly ignoring `per_page`, `page_size` and `total_pages`, which look like totals and are not counts of listings. New listings are tracked by id (`id` or `listingId`) so a broadened response that repeats what was already captured counts as adding nothing and stops the walk.
+
+Bounded in every direction: one pass per event, ten follow-ups at most, a stop at the reported total, and a stop when a response adds no new ids. If nothing is recognised in the query string it says so and does nothing, leaving the click-to-populate behaviour underneath.
+
+Only sites that need this are listed. SeatGeek returns its full set on the first request, so it is deliberately absent — extra requests to a bot-protected endpoint for no gain is a bad trade.
+
+### AXS: Site Integration (No Parser Yet)
+
+AXS is wired through every layer the other sites use — host permissions and content scripts, `axs-adapter.js` for event identity, site discrimination in both the popup and the service worker, brand, labels, CSV filename tag, fee entries, passive-capture empty state, and the reload-instead-of-scan path.
+
+**It does not yet produce seats.** Inventing field names for a payload nobody has seen is exactly how the Evenue integration lost several rounds, so `background.js` reports the path, size and shape of whatever arrives, five levels deep and once per distinct shape, and the parser follows from that.
+
+Capture targets `/veritix/` — AXS's ticketing engine. Its `start-flow/v1` response is the largest JSON the ticket page fetches (611KB on a live T-Mobile Center event), on the same opaque event token as the page url. The first guess at `/api/` matched only skins, tokens and map-viewer cookie checks: `/veritix/` does not contain `/api/`, so the inventory was never captured. The 1.2MB payload from `3ddvapis.com` is deliberately not matched — that is seat-map geometry, not inventory.
+
+AXS stays flagged as unconfirmed, so the candidate ranking keeps listing everything the page fetched even now that something matches. Narrowing the pattern cannot hide a wrong guess.
+
+Capture is passive, like SeatGeek and StubHub. AXS fronts its purchase flow with a queue and bot protection, so issuing our own inventory request would mean forging session state.
+
+AXS has two url shapes and the buying flow uses the second one. Browse pages carry the id in the path (`www.axs.com/events/1234567/slug`), but the ticket flow runs on **tix.axs.com**, where the path is an opaque encoded blob and the event id is the `e` query param:
+
+```
+tix.axs.com/nZA9NwAAAAABIj1H…?c=axs&e=92678159754876303&rt=AfterEvent
+```
+
+Confirmed against a live T-Mobile Center event. `e` is a one-letter parameter name, so it is only accepted with 6+ digits — enough that a pagination or flag value cannot be mistaken for an event id. The adapter and the popup each implement this, as they do for every site, and both were checked against the same urls to confirm they agree, including the cases that must NOT resolve.
+
+### Fix: The Capture Summary Repeated Forever
+
+The summary fired after 12 seconds, cleared its timer, and the next response scheduled another — so on a ticket page, which polls and beacons continuously, it repeated every 12 seconds for as long as the tab stayed open. Making unconfirmed sites reprint the full candidate ranking each time turned that from noise into a flood: seven identical ten-line rankings in one session.
+
+It now reports twice at most — once early enough to be useful, once more only if the page kept loading things worth seeing — and skips the second when nothing has changed since the first. The final line is marked as such. Counting continues either way, and every captured response still logs its own line.
+
+### Fix: A Match on Noise Suppressed the Endpoint Report
+
+Candidate recording stopped as soon as `MATCH_PATTERNS` hit anything. That is right once a site works, but on AXS the deliberately broad `/api/` matched eight skin, token and cookie-check responses from the 3D Digital Venue map viewer — none of them inventory — and that was enough to suppress the report that would have named the real endpoint. The first AXS load produced no ranking at all.
+
+Sites whose endpoint is still unconfirmed now keep recording regardless of what matched, and rank everything the page fetched rather than only the unmatched remainder. A match means nothing until a parser exists to act on it.
+
+### Refactor: One Passive-Site Table
+
+`showEmpty()` took seven positional booleans and was about to take an eighth, with four near-identical branches differing only in a site's name. It now takes a single `detected` object, and the passive sites share one branch driven by `PASSIVE_SITE_LABELS` — the single list of which sites are passive, also read by the reload-instead-of-scan path. Adding a site is now one entry rather than four parallel edits and a positional argument nobody can read.
 
 ### Import Categories From the Popup
 

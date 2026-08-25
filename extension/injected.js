@@ -4,6 +4,12 @@
 (function () {
   if (window.__fifaTicketScoutLoaded) return;
   window.__fifaTicketScoutLoaded = true;
+
+  // Stamped by tools/package.py from a hash of the extension's own sources.
+  // Three debugging rounds in this project were spent on results produced by a
+  // build that had not been reloaded, which is indistinguishable from a change
+  // that did not work. Compare this against what package.py prints.
+  const BUILD_STAMP = "8b5e023b";
   
   // Detect which ticketing site we're on
   const isTicketmaster = window.location.hostname.includes('ticketmaster.com');
@@ -12,19 +18,22 @@
   const isStubHub = window.location.hostname.includes('stubhub.com');
   const isEvenue = window.location.hostname.includes('evenue.net');
   const isTickPick = window.location.hostname.includes('tickpick.com');
+  const isAxs = window.location.hostname.includes('axs.com');
 
   if (isTicketmaster) {
-    console.log("[FIFA Ticket Scout] Running on Ticketmaster (will use adapter)");
+    console.log("[FIFA Ticket Scout] Running on Ticketmaster (will use adapter) build " + BUILD_STAMP);
   } else if (isFifa) {
-    console.log("[FIFA Ticket Scout] Running on FIFA (using FIFA logic)");
+    console.log("[FIFA Ticket Scout] Running on FIFA (using FIFA logic) build " + BUILD_STAMP);
   } else if (isSeatGeek) {
-    console.log("[FIFA Ticket Scout] Running on SeatGeek (passive capture)");
+    console.log("[FIFA Ticket Scout] Running on SeatGeek (passive capture) build " + BUILD_STAMP);
   } else if (isStubHub) {
-    console.log("[FIFA Ticket Scout] Running on StubHub (passive capture)");
+    console.log("[FIFA Ticket Scout] Running on StubHub (passive capture) build " + BUILD_STAMP);
   } else if (isEvenue) {
-    console.log("[FIFA Ticket Scout] Running on Evenue (passive capture)");
+    console.log("[FIFA Ticket Scout] Running on Evenue (passive capture) build " + BUILD_STAMP);
   } else if (isTickPick) {
-    console.log("[FIFA Ticket Scout] Running on TickPick (endpoint discovery mode)");
+    console.log("[FIFA Ticket Scout] Running on TickPick (endpoint discovery mode) build " + BUILD_STAMP);
+  } else if (isAxs) {
+    console.log("[FIFA Ticket Scout] Running on AXS (passive capture, endpoint unconfirmed) build " + BUILD_STAMP);
   } else {
     console.log("[FIFA Ticket Scout] Unknown ticketing site - no action");
     return;
@@ -55,7 +64,22 @@
           ? ["/pac-api/"]
           : isTickPick
             ? ["/listings/internal/event-v2/"]
-            : ["/seatmap/", "/performance/"];
+            : isAxs
+              // Veritix is AXS's ticketing engine, and its start-flow response
+              // is the largest JSON the ticket page fetches (611KB on a live
+              // T-Mobile Center event) keyed by the same opaque event token as
+              // the page url. Note it does NOT contain "/api/", which is why
+              // the first broad guess captured only skins and map-viewer
+              // tokens and missed the inventory entirely.
+              //
+              // The 1.2MB map-viewer payload from 3ddvapis.com is deliberately
+              // not matched: that is seat-map geometry, not inventory.
+              //
+              // AXS stays flagged unconfirmed below, so the candidate ranking
+              // keeps listing everything the page fetched even now that this
+              // matches — narrowing here cannot hide a wrong guess.
+              ? ["/veritix/"]
+              : ["/seatmap/", "/performance/"];
 
   // Defense-in-depth: prevent duplicate scans at the page level.
   // injected.js lives as long as the page — survives SW restarts.
@@ -87,21 +111,45 @@
   // returned no seats". These counters say which actually happened, and go
   // through console.log so content.js relays them into Download Logs.
   const SITE_TAG = isStubHub ? "SH" : isSeatGeek ? "SG" : isEvenue ? "EV"
-    : isTickPick ? "TP" : isTicketmaster ? "TM" : "FIFA";
+    : isTickPick ? "TP" : isAxs ? "AXS" : isTicketmaster ? "TM" : "FIFA";
   const capStats = { seen: 0, matched: 0, parsed: 0, notJson: 0, posted: 0 };
   let capSummaryTimer = null;
 
+  // The summary used to re-arm itself: it fired, cleared its timer, and the
+  // next response scheduled another one. Ticket pages poll and beacon
+  // continuously, so it repeated every 12 seconds forever — and on an
+  // unconfirmed site it reprinted the whole candidate ranking each time.
+  //
+  // Report twice at most. Once early enough to be useful, then once more only
+  // if the page kept loading things worth seeing. Counting continues either
+  // way, and each captured response still logs its own line.
+  const MAX_SUMMARIES = 2;
+  let capSummaryCount = 0;
+  let capSummaryMark = "";
+
   function scheduleCaptureSummary() {
-    if (capSummaryTimer) return;
+    if (capSummaryTimer || capSummaryCount >= MAX_SUMMARIES) return;
+    // Nothing new since the last report means nothing new to say.
+    const mark = capStats.seen + ":" + capStats.matched + ":" + candidates.size;
+    if (capSummaryCount && mark === capSummaryMark) return;
     capSummaryTimer = setTimeout(() => {
       capSummaryTimer = null;
-      console.log(`[${SITE_TAG}] capture: ${capStats.seen} responses seen, ` +
+      capSummaryCount++;
+      capSummaryMark = capStats.seen + ":" + capStats.matched + ":" + candidates.size;
+      console.log(`[${SITE_TAG}] capture${capSummaryCount >= MAX_SUMMARIES ? " (final)" : ""}: ` +
+        `${capStats.seen} responses seen, ` +
         `${capStats.matched} matched ${JSON.stringify(MATCH_PATTERNS)}, ` +
         `${capStats.parsed} parsed as JSON, ${capStats.notJson} not JSON, ` +
         `${capStats.posted} sent to the service worker`);
       if (capStats.matched === 0) {
         console.log(`[${SITE_TAG}] nothing matched ${JSON.stringify(MATCH_PATTERNS)} — the ` +
           `inventory endpoint is not covered by it.`);
+        reportCandidates();
+      } else if (isUnconfirmedSite) {
+        // Something matched, but nothing here is known to be inventory yet, so
+        // the ranking is still the useful output.
+        console.log(`[${SITE_TAG}] endpoint not confirmed yet — ranking everything ` +
+          `the page fetched, matched or not:`);
         reportCandidates();
       } else if (capStats.posted === 0) {
         console.log(`[${SITE_TAG}] matched but nothing was sent — the response was not ` +
@@ -117,13 +165,27 @@
   // second reload. Only runs while nothing has matched yet, and only for JSON
   // responses on the passive-capture sites, so the cost disappears the moment
   // capture works.
-  const isPassiveSite = isStubHub || isSeatGeek || isEvenue || isTickPick;
+  const isPassiveSite = isStubHub || isSeatGeek || isEvenue || isTickPick || isAxs;
+
+  // Sites where the inventory endpoint is still unknown. Candidate recording
+  // normally stops as soon as MATCH_PATTERNS hits something, which is right
+  // once a site works — but on AXS a broad "/api/" matched eight skin, token
+  // and cookie-check responses, and that was enough to suppress the report
+  // that would have named the real endpoint. While a site is unconfirmed,
+  // keep recording regardless of what matched.
+  //
+  // StubHub is here for a narrower reason: its inventory endpoint IS known and
+  // parsed, but it only ever returns the batch the page asked for. The full
+  // set of listing ids comes from somewhere that has not been identified yet,
+  // so keep ranking every response until it is. Remove once that is settled.
+  const isUnconfirmedSite = isAxs || isStubHub;
   const MAX_CANDIDATES = 60;
   const CANDIDATE_MIN_CHARS = 2000;
   const candidates = new Map();   // path -> largest byte length seen
 
   function recordCandidate(url, response) {
-    if (!isPassiveSite || capStats.matched > 0) return;
+    if (!isPassiveSite) return;
+    if (capStats.matched > 0 && !isUnconfirmedSite) return;
     if (candidates.size >= MAX_CANDIDATES) return;
     const clean = String(url).split("?")[0];
     if (PROBE_SKIP.test(clean)) return;
@@ -398,6 +460,7 @@
         : isStubHub ? window.__stubhubAdapter
         : isEvenue ? window.__evenueAdapter
         : isTickPick ? window.__tickpickAdapter
+        : isAxs ? window.__axsAdapter
         : null;
       return adapter ? adapter.getEventInfo() : undefined;
     } catch (e) {
@@ -407,6 +470,494 @@
 
   // Capture headers from real requests so the scan can reuse them
   let capturedHeaders = null;
+
+  // The whole request behind the first inventory response: method, url and
+  // body. StubHub sends its filters in a POST body rather than the query
+  // string — the response echoes `quantity`, `sections` and `sectionIds` back —
+  // so broadening by editing query parameters alone can never work there.
+  let capturedRequest = null;
+
+  function rememberRequest(url, method, body) {
+    if (capturedRequest) return;
+    if (typeof body !== "string" || !body) return;
+    capturedRequest = { url: String(url), method: String(method || "GET").toUpperCase(), body };
+  }
+
+  // ─── Pull the rest of the inventory ──────────────────────────────────────
+  // Some sites answer their first inventory request with a FILTERED subset —
+  // StubHub's query string carries sections, rows and quantity — so a single
+  // capture is a slice of the event. Everything still arrives eventually,
+  // because background.js merges each capture into the stored seats, but only
+  // as fast as someone clicks around the page, which is far too slow to be
+  // useful.
+  //
+  // So after the page's own request lands, re-issue it broadened. This runs in
+  // the page's own context: same origin, same cookies, and the headers the page
+  // itself sent, so it is the page's request repeated rather than a forged one.
+  // That matters — these endpoints sit behind Talos and DataDome, which is why
+  // the adapters never built a request from scratch.
+  //
+  // Only sites that actually need it are listed. SeatGeek returns the full set
+  // on its first request, so it is deliberately absent: extra requests to a
+  // bot-protected endpoint for no gain is a bad trade.
+  const FOLLOW_UP_SITES = {
+    stubhub: {
+      tag: "SH",
+      listingsKey: "items",
+      // Observed live. The request is:
+      //   POST /<slug>/event/<id>/?quantity=2
+      //   {Method, EventId, Quantity, EstimatedFees, InstantDelivery, ListingIds}
+      //
+      // It is not "give me the inventory" — it is "give me details for THESE
+      // listing ids". The page holds all 591 and asks for ten at a time as you
+      // scroll, which is why clicking around slowly fills the dashboard.
+      //
+      // So the thing to remove is ListingIds, in the hope the endpoint answers
+      // with everything when not asked for a specific set. Quantity is NOT
+      // removed: doing that returned zero listings. Variants are tried in
+      // order and the first that returns more than the page got wins.
+      bodyVariants: [
+        { drop: ["listingids"], label: "without ListingIds" },
+        { drop: ["listingids", "quantity"], label: "without ListingIds or Quantity" },
+        { drop: ["listingids"], set: { Quantity: 0 }, label: "without ListingIds, Quantity=0" },
+      ],
+      // Editing the query string is pointless here and actively harmful:
+      // dropping `quantity` from it returns an HTML page, not JSON.
+      queryStrategies: false,
+      dropParams: [],
+      sizeParams: [],
+      indexParams: [],
+    },
+  };
+
+  const FOLLOW_UP_MAX_PAGES = 10;
+  // 30 batches of ten covers ~300 listings beyond the first page. Bounded so a
+  // huge event cannot turn into hundreds of requests at a protected endpoint.
+  const FOLLOW_UP_MAX_BATCHES = 40;
+  // Ids per request. Larger than the ten the page uses, because the endpoint
+  // takes a list and fewer round trips is both faster and gentler.
+  const FOLLOW_UP_BATCH_SIZE = 25;
+  const FOLLOW_UP_WIDE_PAGE = 1000;
+  let followUpDone = false;
+
+  function followUpConfig() {
+    return isStubHub ? FOLLOW_UP_SITES.stubhub : null;
+  }
+
+  // The biggest number under a total-looking key, at any depth. Sites move this
+  // between response versions, so match on the key name rather than a fixed
+  // path — but never on `per_page`, `page_size` or `total_pages`, which look
+  // like totals and are not counts of listings.
+  function inventoryTotal(node, depth) {
+    if (!node || typeof node !== "object" || (depth || 0) > 4) return null;
+    let best = null;
+    Object.keys(node).forEach((key) => {
+      const value = node[key];
+      if (typeof value === "number" && value > 0 && /total|count/i.test(key)
+          && !/page|per|size/i.test(key)) {
+        if (best == null || value > best) best = value;
+      } else if (value && typeof value === "object") {
+        const inner = inventoryTotal(value, (depth || 0) + 1);
+        if (inner != null && (best == null || inner > best)) best = inner;
+      }
+    });
+    return best;
+  }
+
+  function postInventory(url, body) {
+    window.postMessage(
+      { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(url), body, eventInfo: pageEventInfo() },
+      "*"
+    );
+  }
+
+  async function fetchInventory(url) {
+    // `originalFetch` is declared further down, with the fetch patch. That is
+    // fine because nothing here runs at load time — the first call comes from
+    // inside the hook, long after. Do not call this during setup.
+    //
+    // Same headers the page used, so this is indistinguishable from its own
+    // request. `capturedHeaders` is filled by the hooks below on first sight.
+    const init = { credentials: "include" };
+    if (capturedHeaders) init.headers = capturedHeaders;
+    const response = await originalFetch.call(window, url, init);
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    return response.json();
+  }
+
+  // Every listing id anywhere in a response.
+  //
+  // StubHub's detail endpoint answers only for the ids it is given, and
+  // re-posting without ListingIds returns nothing — so the way to get the rest
+  // is to find the ids and ask for them. Hovering a section makes the page
+  // request that section's listings, which means the page already holds every
+  // id; the response that seeds it should carry them too.
+  //
+  // Matched on key name rather than a fixed path, since the ids may sit under
+  // ListingIds, or as `id` on objects inside a listings/sections array.
+  function harvestListingIds(node, out, depth) {
+    if (!node || typeof node !== "object" || (depth || 0) > 6) return;
+    if (Array.isArray(node)) {
+      node.forEach((n) => harvestListingIds(n, out, (depth || 0) + 1));
+      return;
+    }
+    Object.keys(node).forEach((key) => {
+      const value = node[key];
+      if (/^listing_?ids?$/i.test(key)) {
+        const list = Array.isArray(value) ? value : [value];
+        list.forEach((v) => {
+          if (v != null && (typeof v === "number" || typeof v === "string")) out.add(String(v));
+        });
+        return;
+      }
+      // An array of listing-shaped objects: take their ids.
+      if (Array.isArray(value) && /listing/i.test(key)) {
+        value.forEach((entry) => {
+          const id = idOf(entry);
+          if (id != null) out.add(String(id));
+        });
+      }
+      harvestListingIds(value, out, (depth || 0) + 1);
+    });
+  }
+
+  // Page-side shape describer. background.js has its own; this one exists so a
+  // rejected batch can name what came back instead of failing silently.
+  function describeShapeLite(value, depth) {
+    if (value === null) return "null";
+    if (Array.isArray(value)) {
+      return `array(${value.length}` +
+        (value.length && depth > 0 ? " of " + describeShapeLite(value[0], depth - 1) : "") + ")";
+    }
+    if (typeof value === "object") {
+      const keys = Object.keys(value);
+      const shown = keys.slice(0, 8);
+      if (depth <= 0) return `{${shown.join(",")}${keys.length > 8 ? ",…" : ""}}`;
+      return `{${shown.map((k) => `${k}:${describeShapeLite(value[k], depth - 1)}`).join(",")}` +
+        `${keys.length > 8 ? ",…" : ""}}`;
+    }
+    if (typeof value === "string") return value.length > 40 ? "string" : JSON.stringify(value);
+    return typeof value;
+  }
+
+
+  function listingsOf(body, key) {
+    // StubHub answers the page's own request with {items:[...]} but answers a
+    // ListingIds request with a BARE ARRAY of the same listing objects. Reading
+    // only `items` made a working batch look like an empty one, which is what
+    // stopped the sweep on its first pass.
+    if (Array.isArray(body)) return body;
+    const list = body && body[key];
+    return Array.isArray(list) ? list : null;
+  }
+
+  function idOf(listing) {
+    if (!listing || typeof listing !== "object") return null;
+    return listing.id != null ? listing.id
+      : listing.listingId != null ? listing.listingId
+      : null;
+  }
+
+  async function maybeFollowUp(rawUrl, body) {
+    const config = followUpConfig();
+    if (!config || followUpDone) return;
+    const first = listingsOf(body, config.listingsKey);
+    if (!first || !first.length) return;
+
+    const tag = config.tag;
+    let url;
+    try {
+      url = new URL(toAbsoluteUrl(rawUrl));
+    } catch (e) {
+      console.log(`[${tag}] follow-up: could not parse the request url — skipping`);
+      followUpDone = true;
+      return;
+    }
+    // Set only once the request is understood. Setting it earlier meant an
+    // early return disabled follow-up for the whole page with nothing logged,
+    // which is indistinguishable from the code never running at all.
+    followUpDone = true;
+
+    const have = first.length;
+    const total = inventoryTotal(body, 0);
+    const params = [...url.searchParams.keys()];
+
+    // The request is what has to be broadened, so describe it fully: the query
+    // string, the method, and the body's field names. noteCapture() strips the
+    // query for brevity, which hid exactly this.
+    let requestBody = null;
+    if (capturedRequest && capturedRequest.method !== "GET") {
+      try { requestBody = JSON.parse(capturedRequest.body); } catch (e) { requestBody = null; }
+    }
+    const bodyKeys = requestBody && typeof requestBody === "object" && !Array.isArray(requestBody)
+      ? Object.keys(requestBody) : null;
+
+    console.log(`[${tag}] inventory: ${have} in this response` +
+      (total != null ? `, ${total} reported for the event` : ", no total reported"));
+    console.log(`[${tag}] request: ${capturedRequest ? capturedRequest.method : "GET"} ` +
+      `${url.pathname}${url.search || " (no query)"}` +
+      (bodyKeys ? ` | body fields: ${bodyKeys.join(", ")}` : "") +
+      (capturedRequest && !bodyKeys && capturedRequest.method !== "GET"
+        ? ` | body is not JSON: ${capturedRequest.body.slice(0, 120)}` : ""));
+
+    if (total != null && have >= total) {
+      console.log(`[${tag}] first response already holds everything — no follow-up needed`);
+      return;
+    }
+
+    const seen = new Set();
+    first.forEach((l) => { const id = idOf(l); if (id != null) seen.add(id); });
+
+    const send = (href, page) => {
+      const list = listingsOf(page, config.listingsKey) || [];
+      const fresh = list.filter((l) => { const id = idOf(l); return id == null || !seen.has(id); });
+      fresh.forEach((l) => { const id = idOf(l); if (id != null) seen.add(id); });
+      if (fresh.length) postInventory(href, page);
+      return fresh.length;
+    };
+
+    let added = 0;
+    try {
+      // 0a. Ask for the ids the page already knows about.
+      //
+      //     This is what hovering a section does by hand: the page requests
+      //     that section's listings and they appear in the dashboard. Doing it
+      //     in batches gets the whole event without the clicking.
+      const idField = bodyKeys && bodyKeys.find((k) => /^listing_?ids?$/i.test(k));
+      if (idField && capturedRequest) {
+        const known = new Set();
+        harvestListingIds(body, known, 0);
+        // The ids the page just asked for are already captured.
+        (Array.isArray(requestBody[idField]) ? requestBody[idField] : [])
+          .forEach((id) => known.delete(String(id)));
+
+        const wanted = [...known].filter((id) => !seen.has(id) && !seen.has(Number(id)));
+        if (wanted.length) {
+          // The page asks ten at a time, but the endpoint takes a list, so ask
+          // for more per request: 351 ids is 36 round trips at ten and 15 at
+          // twenty-five. Fewer requests is also gentler on a protected
+          // endpoint. If the larger size turns out to be rejected, the retry
+          // below falls back to exactly what the page itself uses.
+          const pageSize = (Array.isArray(requestBody[idField]) ? requestBody[idField].length : 0) || 10;
+          let batchSize = Math.max(pageSize, FOLLOW_UP_BATCH_SIZE);
+          console.log(`[${tag}] harvested ${wanted.length} more listing id(s) from the ` +
+            `response — sweeping in batches of ${batchSize}, adding any further ids ` +
+            `each response turns up`);
+
+          // A queue rather than a fixed list of batches: every response carries
+          // listing ids of its own, so ids discovered along the way are added
+          // and swept too. That is what reaches listings in sections the page
+          // itself never requested — the first response alone only held 280 of
+          // an event's 534.
+          const queue = wanted.slice();
+          const requested = new Set();
+          let emptyBatches = 0;
+          let batchNo = 0;
+          let firstBatch = true;
+
+          while (queue.length && batchNo < FOLLOW_UP_MAX_BATCHES) {
+            const batch = queue.splice(0, batchSize);
+            batch.forEach((id) => requested.add(id));
+            batchNo++;
+
+            const batchBody = {};
+            bodyKeys.forEach((k) => { batchBody[k] = requestBody[k]; });
+            batchBody[idField] = batch;
+            const init = {
+              method: capturedRequest.method,
+              credentials: "include",
+              body: JSON.stringify(batchBody),
+            };
+            if (capturedHeaders) init.headers = capturedHeaders;
+
+            let page;
+            try {
+              const response = await originalFetch.call(window, capturedRequest.url, init);
+              if (!response.ok) throw new Error("HTTP " + response.status);
+              page = await response.json();
+            } catch (err) {
+              console.log(`[${tag}] batch ${batchNo} failed: ${err && err.message} — stopping`);
+              break;
+            }
+
+            const got = (listingsOf(page, config.listingsKey) || []).length;
+            const fresh = send(capturedRequest.url, page);
+            added += fresh;
+
+            if (!got) {
+              if (firstBatch && batchSize > pageSize) {
+                // The larger batch may simply be more than the endpoint takes.
+                // Retry once at exactly the size the page itself uses before
+                // concluding anything.
+                console.log(`[${tag}] batch 1 empty at ${batchSize} ids ` +
+                  `(response ${describeShapeLite(page, 2)}) — retrying at the ` +
+                  `page's own size of ${pageSize}`);
+                batch.forEach((id) => { requested.delete(id); queue.unshift(id); });
+                batchSize = pageSize;
+                batchNo = 0;
+                firstBatch = false;
+                continue;
+              }
+              console.log(`[${tag}] batch ${batchNo} returned no listings — ` +
+                `response was ${describeShapeLite(page, 3)}. Stopping.`);
+              break;
+            }
+            firstBatch = false;
+
+            // Ids this response knows about that nothing has asked for yet.
+            const discovered = new Set();
+            harvestListingIds(page, discovered, 0);
+            let queued = 0;
+            discovered.forEach((id) => {
+              if (requested.has(id) || seen.has(id) || seen.has(Number(id))) return;
+              if (queue.indexOf(id) >= 0) return;
+              queue.push(id);
+              queued++;
+            });
+            if (queued) {
+              console.log(`[${tag}] batch ${batchNo}: +${fresh} listing(s), ` +
+                `${queued} new id(s) discovered (${queue.length} still queued)`);
+            }
+
+            if (!fresh) {
+              // Real listings, all already captured. Not a failure, and not a
+              // reason to abandon the queue.
+              if (++emptyBatches >= 3) {
+                console.log(`[${tag}] three batches in a row were all duplicates — stopping`);
+                break;
+              }
+              continue;
+            }
+            emptyBatches = 0;
+          }
+
+          if (queue.length) {
+            console.log(`[${tag}] stopped with ${queue.length} id(s) still queued ` +
+              `(cap is ${FOLLOW_UP_MAX_BATCHES} batches)`);
+          }
+
+          console.log(`[${tag}] batches added ${added} listing(s)`);
+          if (added) return;
+        } else {
+          console.log(`[${tag}] the response carries no listing ids beyond the ` +
+            `${have} already captured — the full set is held by the page itself, ` +
+            `not in this response`);
+        }
+      }
+
+      // 0b. Broaden the request BODY. Try each variant until one returns more
+      //     than the page itself got; stop at the first that does.
+      if (bodyKeys && config.bodyVariants) {
+        for (let v = 0; v < config.bodyVariants.length; v++) {
+          const variant = config.bodyVariants[v];
+          const wideBody = {};
+          const removed = [];
+          bodyKeys.forEach((key) => {
+            if (variant.drop.indexOf(key.toLowerCase()) >= 0) { removed.push(key); return; }
+            wideBody[key] = requestBody[key];
+          });
+          if (variant.set) Object.keys(variant.set).forEach((k) => { wideBody[k] = variant.set[k]; });
+          if (!removed.length) continue;
+
+          const init = {
+            method: capturedRequest.method,
+            credentials: "include",
+            body: JSON.stringify(wideBody),
+          };
+          if (capturedHeaders) init.headers = capturedHeaders;
+
+          let page;
+          try {
+            const response = await originalFetch.call(window, capturedRequest.url, init);
+            if (!response.ok) throw new Error("HTTP " + response.status);
+            page = await response.json();
+          } catch (err) {
+            console.log(`[${tag}] ${variant.label}: ${err && err.message}`);
+            continue;
+          }
+
+          const got = (listingsOf(page, config.listingsKey) || []).length;
+          const fresh = send(capturedRequest.url, page);
+          added += fresh;
+          console.log(`[${tag}] ${variant.label}: ${got} listing(s), ${fresh} new`);
+          if (fresh > 0) break;
+        }
+
+        if (added) {
+          console.log(`[${tag}] follow-up added ${added} listing(s) beyond the ${have} ` +
+            `the page fetched itself`);
+        } else {
+          console.log(`[${tag}] no variant returned more than the page's own request. ` +
+            `The full set (${total != null ? total : "unknown"}) is held by the page and ` +
+            `requested in batches, so it will still fill in as you scroll.`);
+        }
+        if (added || !config.queryStrategies) return;
+      }
+
+      // 1. Drop the filters from the query string, for sites that put them there.
+      if (!config.queryStrategies) return;
+      const dropped = params.filter((k) => config.dropParams.indexOf(k.toLowerCase()) >= 0);
+      if (dropped.length) {
+        const wide = new URL(url.href);
+        dropped.forEach((k) => wide.searchParams.delete(k));
+        const page = await fetchInventory(wide.href);
+        added += send(wide.href, page);
+        console.log(`[${tag}] refetched without ${dropped.join(", ")}: ` +
+          `${(listingsOf(page, config.listingsKey) || []).length} listing(s), ` +
+          `${added} new`);
+        if (total != null && have + added >= total) {
+          console.log(`[${tag}] follow-up added ${added} listing(s)`);
+          return;
+        }
+      }
+
+      // 2. Widen the page size, if the request carries one.
+      const sizeParam = params.find((k) => config.sizeParams.indexOf(k.toLowerCase()) >= 0);
+      if (sizeParam) {
+        const wide = new URL(url.href);
+        config.dropParams.forEach((k) => wide.searchParams.delete(k));
+        wide.searchParams.set(sizeParam, String(FOLLOW_UP_WIDE_PAGE));
+        const page = await fetchInventory(wide.href);
+        added += send(wide.href, page);
+        console.log(`[${tag}] refetched with ${sizeParam}=${FOLLOW_UP_WIDE_PAGE}: ${added} new so far`);
+        if (total != null && have + added >= total) {
+          console.log(`[${tag}] follow-up added ${added} listing(s)`);
+          return;
+        }
+      }
+
+      // 3. Walk pages until one adds nothing.
+      const indexParam = params.find((k) => config.indexParams.indexOf(k.toLowerCase()) >= 0);
+      if (indexParam) {
+        const isOffset = /offset|start/i.test(indexParam);
+        for (let i = 1; i <= FOLLOW_UP_MAX_PAGES; i++) {
+          const next = new URL(url.href);
+          config.dropParams.forEach((k) => next.searchParams.delete(k));
+          next.searchParams.set(indexParam, String(isOffset ? have * (i + 1) : i + 1));
+          const page = await fetchInventory(next.href);
+          const fresh = send(next.href, page);
+          if (!fresh) break;
+          added += fresh;
+          if (total != null && have + added >= total) break;
+        }
+      }
+
+      if (!dropped.length && !sizeParam && !indexParam && !bodyKeys) {
+        console.log(`[${tag}] no filter or paging parameter recognised ` +
+          `(saw: ${params.join(", ") || "none"}), so the rest cannot be requested. ` +
+          `Listings will still fill in as the page loads them.`);
+        return;
+      }
+
+      console.log(`[${tag}] follow-up added ${added} listing(s) beyond the ${have} ` +
+        `the page fetched itself`);
+    } catch (e) {
+      // Never break the page, and never retry into a rate limit.
+      console.log(`[${tag}] follow-up stopped: ${e && e.message}. ` +
+        "Listings will still fill in as the page loads them.");
+    }
+  }
+
 
   // Mirror our own console output to the extension's log buffer.
   //
@@ -420,7 +971,7 @@
   //      chatty enough to blow out the buffer in seconds.
   //   2. Guard re-entrancy. Our postMessage is observed by the listener below,
   //      and anything that logs while handling a message would loop forever.
-  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[FIFA]", "[TM]", "[SG]", "[SH]", "[EV]", "[TP]", "[TP-PROBE]", "[EV-PROBE]", "[SH-PROBE]", "[SG-PROBE]", "[TM-PROBE]"];
+  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[FIFA]", "[TM]", "[SG]", "[SH]", "[EV]", "[TP]", "[AXS]", "[TP-PROBE]", "[EV-PROBE]", "[SH-PROBE]", "[SG-PROBE]", "[TM-PROBE]", "[AXS-PROBE]"];
   const originalLog = console.log;
   let relayingLog = false;
   console.log = function (...args) {
@@ -454,6 +1005,11 @@
 
     const willCapture = shouldCapture(url);
 
+    if (willCapture) {
+      const init = args[1] || {};
+      rememberRequest(toAbsoluteUrl(url), init.method || "GET", init.body);
+    }
+
     // Capture headers from any seatmap request the page makes
     if (willCapture && !capturedHeaders) {
       const init = args[1] || {};
@@ -475,7 +1031,9 @@
     }
 
     countResponse(willCapture);
-    if (!willCapture) recordCandidate(url, response);
+    // On an unconfirmed site everything is a candidate, including the
+    // responses that did match — the match means nothing until a parser exists.
+    if (!willCapture || isUnconfirmedSite) recordCandidate(url, response);
 
     if (willCapture) {
       try {
@@ -486,6 +1044,7 @@
           { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(url), body, eventInfo: pageEventInfo() },
           "*"
         );
+        maybeFollowUp(url, body);
       } catch {
         // Not JSON, or the body was already consumed. Previously silent, which
         // made a wrong endpoint pattern indistinguishable from an empty event.
@@ -503,6 +1062,7 @@
 
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
     this._ftsUrl = url;
+    this._ftsMethod = method;
     this._ftsHeaders = {};
     return originalOpen.call(this, method, url, ...rest);
   };
@@ -536,6 +1096,8 @@
     if (this._ftsUrl) countResponse(xhrWillCapture);
 
     if (xhrWillCapture) {
+      rememberRequest(toAbsoluteUrl(this._ftsUrl), this._ftsMethod, args[0]);
+
       // Capture headers from real XHR requests
       if (!capturedHeaders && this._ftsHeaders && Object.keys(this._ftsHeaders).length > 0) {
         capturedHeaders = { ...this._ftsHeaders };
@@ -550,6 +1112,7 @@
             { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(this._ftsUrl), body, eventInfo: pageEventInfo() },
             "*"
           );
+          maybeFollowUp(this._ftsUrl, body);
         } catch {
           noteCapture(this._ftsUrl, null, false);
         }

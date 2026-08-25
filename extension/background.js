@@ -118,6 +118,7 @@ function siteFromUrl(url) {
     if (h.includes("stubhub")) return "stubhub";
     if (h.includes("evenue")) return "evenue";
     if (h.includes("tickpick")) return "tickpick";
+    if (h.includes("axs")) return "axs";
     if (h.includes("-resale-")) return "resale";
     if (h.includes("-shop-"))   return "lms";
   } catch {}
@@ -665,6 +666,27 @@ async function processApiResponse(url, body, tabId, eventInfo) {
     }
   }
 
+  // AXS — bring-up only. No parser yet: the inventory payload has not been
+  // observed, and inventing field names for a shape nobody has seen is how the
+  // Evenue integration lost several rounds. Report what arrives, once per
+  // distinct shape, so one load names the endpoint and its structure.
+  if (site === "axs") {
+    const path = url.split("?")[0];
+    // The start-flow payload is ~611KB; a five-level shape of it is long but
+    // bounded (eight keys per level), and truncating keeps one response from
+    // eating the whole 1000-line log buffer.
+    const shape = describeShape(body, 5).slice(0, 2000);
+    const seen = path + " " + shape;
+    if (!axsSeenShapes.has(seen)) {
+      axsSeenShapes.add(seen);
+      const size = (() => {
+        try { return Math.round(JSON.stringify(body).length / 1024) + "KB"; }
+        catch (e) { return "?"; }
+      })();
+      bgLog(`[background] AXS: ${path} (${size}) -> ${shape}`);
+    }
+  }
+
   // Evenue seat availability — captured passively. Matched on the payload
   // shape rather than an exact path: the endpoint was confirmed on one
   // school's instance and Paciolan builds differ between schools, so pinning
@@ -705,16 +727,56 @@ async function processApiResponse(url, body, tabId, eventInfo) {
     }
   }
 
+  // StubHub: report what every captured response actually holds.
+  //
+  // The page reports 591 listings for the event but the detail endpoint only
+  // ever answers with the ten it was asked for, and re-posting without
+  // ListingIds returns nothing. One response on this path is 215KB, which is
+  // far more than ten listings should need — so the rest may be present under
+  // a key nobody is reading. Count every top-level array so that is visible
+  // instead of inferred.
+  if (site === "stubhub" && body && typeof body === "object" && !Array.isArray(body)) {
+    const arrays = Object.keys(body)
+      .filter((k) => Array.isArray(body[k]))
+      .map((k) => `${k}=${body[k].length}`);
+    const numbers = Object.keys(body)
+      .filter((k) => typeof body[k] === "number" && /total|count|available/i.test(k))
+      .map((k) => `${k}=${body[k]}`);
+    const signature = arrays.join(",") + "|" + numbers.join(",");
+    if (arrays.length && !stubhubSeenShapes.has(signature)) {
+      stubhubSeenShapes.add(signature);
+      let size = "?";
+      try { size = Math.round(JSON.stringify(body).length / 1024) + "KB"; } catch (e) {}
+      bgLog(`[background] StubHub: response (${size}) arrays: ${arrays.join(", ")}` +
+        (numbers.length ? ` | counts: ${numbers.join(", ")}` : ""));
+      // Name the shape of the biggest array that is not `items` — if the full
+      // set is hiding anywhere, it is there.
+      const biggest = Object.keys(body)
+        .filter((k) => Array.isArray(body[k]) && k !== "items")
+        .sort((a, b) => body[b].length - body[a].length)[0];
+      if (biggest && body[biggest].length) {
+        bgLog(`[background] StubHub: ${biggest}[0] -> ${describeShape(body[biggest][0], 3)}`);
+      }
+    }
+  }
+
   // StubHub listings — captured passively. The response comes back on the
   // event page's own path with a query string, so the body shape is what
   // identifies it, not the url.
-  if (site === "stubhub" && Array.isArray(body.items) && body.items.length) {
+  // Two shapes from the same endpoint: the page's own request answers with
+  // {items:[...]}, a ListingIds request answers with a bare array of the same
+  // listing objects. Accept either.
+  const stubHubListings = site === "stubhub"
+    ? (Array.isArray(body) ? body : (Array.isArray(body.items) ? body.items : null))
+    : null;
+
+  if (stubHubListings && stubHubListings.length) {
     const eventId = extractParam(url, "eventId")
       || (url.match(/\/event\/(\d+)/i) || [])[1]
-      || String(body.items[0].eventId || "");
+      || String(stubHubListings[0].eventId || "");
     if (eventId) {
       await enforceGameLimit(`${site}:${eventId}`);
-      await saveStubHubSeats(eventId, body, tabId, site, eventInfo);
+      await saveStubHubSeats(eventId, { items: stubHubListings }, tabId, site, eventInfo);
     }
   }
 
@@ -1406,6 +1468,13 @@ function evenueLogFeeTable(node, depth) {
   });
 }
 
+// AXS payload shapes already reported, so bring-up logs each once rather than
+// once per response.
+const axsSeenShapes = new Set();
+
+// Same, for the StubHub array census.
+const stubhubSeenShapes = new Set();
+
 // Paths already reported as "not the seat array", so the log names each once.
 const evenueIgnoredPaths = new Set();
 
@@ -2027,16 +2096,46 @@ async function autoScan(performanceId, productId, tabId, site) {
 }
 
 // Free tier: only one game at a time — clear old game when switching
+// Licensed users kept every event they ever opened. Each capture rewrites the
+// whole `games` object, and one StubHub sweep produces a dozen or more
+// captures, so by roughly the thirteenth event the popup was serialising
+// megabytes of seat data on every response and froze. chrome.storage.local is
+// a 10MB quota without the `unlimitedStorage` permission, which this extension
+// does not request.
+//
+// Keep the most recently scanned events and drop the rest. Eight is far more
+// than anyone compares at once and keeps the payload small.
+const MAX_STORED_GAMES = 8;
+
 async function enforceGameLimit(gameKey) {
   const data = await getStorage();
   const level = data.license?.level || 0;
-  if (level >= TIERS.PRO) return;
-
   const games = data.games || {};
   const existingKeys = Object.keys(games);
-  if (existingKeys.length > 0 && !existingKeys.includes(gameKey)) {
-    await chrome.storage.local.set({ games: {} });
+
+  if (level < TIERS.PRO) {
+    // Free tier: one event at a time, as before.
+    if (existingKeys.length > 0 && !existingKeys.includes(gameKey)) {
+      await chrome.storage.local.set({ games: {} });
+    }
+    return;
   }
+
+  if (existingKeys.length <= MAX_STORED_GAMES) return;
+
+  // The event being written always survives; the rest are ranked by when they
+  // were last scanned, oldest evicted first.
+  const ranked = existingKeys
+    .filter((key) => key !== gameKey)
+    .sort((a, b) => (games[b]?.lastScanned || 0) - (games[a]?.lastScanned || 0));
+  const keep = new Set([gameKey].concat(ranked.slice(0, MAX_STORED_GAMES - 1)));
+
+  const dropped = existingKeys.filter((key) => !keep.has(key));
+  if (!dropped.length) return;
+  dropped.forEach((key) => { delete games[key]; });
+  await chrome.storage.local.set({ games });
+  bgLog(`[background] evicted ${dropped.length} least-recently-scanned event(s) ` +
+    `to stay under ${MAX_STORED_GAMES}: ${dropped.join(", ")}`);
 }
 
 function sendScanToTab(productId, performanceId, tabId, force) {

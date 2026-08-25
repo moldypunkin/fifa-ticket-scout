@@ -15,6 +15,7 @@ Runs tests/run.py first — a parse error in background.js stops the service
 worker from starting, and that is not something to discover after uploading.
 """
 
+import hashlib
 import io
 import json
 import os
@@ -84,6 +85,44 @@ def wanted(name):
     return name.lower().endswith(INCLUDE_SUFFIXES)
 
 
+STAMPED_FILE = os.path.join(SOURCE, "injected.js")
+STAMP_RE = re.compile(r'(const BUILD_STAMP = ")([^"]*)(";)')
+
+
+def stamp_build():
+    """Write a short content hash into injected.js and return it.
+
+    A loaded-but-stale extension produces results indistinguishable from a
+    change that did not work, which cost this project three debugging rounds.
+    The stamp is logged by injected.js on every page, so "is my build current"
+    is one glance rather than an inference.
+
+    Hashed over the shipped sources with the stamp line itself blanked, so the
+    value is stable for unchanged content instead of chasing its own tail.
+    """
+    digest = hashlib.sha256()
+    for full, arc in collect():
+        with io.open(full, "rb") as fh:
+            data = fh.read()
+        if os.path.abspath(full) == os.path.abspath(STAMPED_FILE):
+            text = data.decode("utf-8")
+            data = STAMP_RE.sub(lambda m: m.group(1) + m.group(3), text).encode("utf-8")
+        digest.update(arc.encode("utf-8"))
+        digest.update(data)
+    short = digest.hexdigest()[:8]
+
+    with io.open(STAMPED_FILE, encoding="utf-8") as fh:
+        text = fh.read()
+    if not STAMP_RE.search(text):
+        print("warning: injected.js has no BUILD_STAMP to write")
+        return short
+    updated = STAMP_RE.sub(lambda m: m.group(1) + short + m.group(3), text)
+    if updated != text:
+        with io.open(STAMPED_FILE, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(updated)
+    return short
+
+
 def collect():
     """(absolute path, archive name) for every file to ship, sorted."""
     found = []
@@ -118,6 +157,7 @@ def main():
             return code
         print("")
 
+    stamp = stamp_build()
     files = collect()
     if not any(arc == "manifest.json" for _, arc in files):
         print("No manifest.json at the root of extension/ — not building.")
@@ -138,7 +178,10 @@ def main():
                 z.writestr(info, fh.read())
 
     size = os.path.getsize(out)
-    print("Built %s  (%d files, %.0f KB)" % (os.path.basename(out), len(files), size / 1024.0))
+    print("Built %s  (%d files, %.0f KB)  build %s"
+          % (os.path.basename(out), len(files), size / 1024.0, stamp))
+    print("  the page console logs this stamp — if it does not match, the "
+          "extension was not reloaded")
     for _, arc in files:
         print("   " + arc)
 

@@ -136,6 +136,7 @@ function siteFromUrl(url) {
     if (h.includes("stubhub")) return "stubhub";
     if (h.includes("evenue")) return "evenue";
     if (h.includes("tickpick")) return "tickpick";
+    if (h.includes("axs")) return "axs";
     if (h.includes("-shop-")) return "lms";
     if (h.includes("-resale-")) return "resale";
   } catch {}
@@ -184,10 +185,35 @@ function loadData() {
     const tpEventMatch = isTickPickSite && (url.match(/\/e\/(\d+)/i) || url.match(/\/(\d{5,})(?:[/?#]|$)/));
     const tpEventId = tpEventMatch ? tpEventMatch[1] : null;
     const isTickPickEvent = !!tpEventId;
+    // AXS: /events/<id>/<slug> on the browse site, or the `e` query param on
+    // tix.axs.com where the path is an opaque blob. Mirrors getAxsEventId() in
+    // axs-adapter.js — `e` needs 6+ digits there for the same reason.
+    const isAxsSite = /axs\.com/.test(url);
+    const axsEventMatch = isAxsSite && (url.match(/\/events?\/(\d{4,})/i)
+      || url.match(/[?&]eventId=(\d{4,})/i)
+      || url.match(/[?&]e=(\d{6,})/i));
+    const axsEventId = axsEventMatch ? axsEventMatch[1] : null;
+    const isAxsEvent = !!axsEventId;
+
+    // One object rather than a positional argument per site: the list only
+    // grows, and eight booleans in a row is a silent mis-wire waiting to happen.
+    const detected = {
+      fifaSite: isFifaSite,
+      seatMap: isSeatMap,
+      ticketmaster: isTicketmasterEvent,
+      // The passive-capture site whose event page we are on, if any. Their
+      // empty states differ only by name.
+      passive: isSeatGeekEvent ? "seatgeek"
+        : isStubHubEvent ? "stubhub"
+        : isEvenueEvent ? "evenue"
+        : isTickPickEvent ? "tickpick"
+        : isAxsEvent ? "axs"
+        : null,
+    };
 
     chrome.storage.local.get(null, (data) => {
       if (chrome.runtime.lastError || !data?.games) {
-        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent, isEvenueEvent, isTickPickEvent);
+        showEmpty(detected);
         return;
       }
 
@@ -195,7 +221,7 @@ function loadData() {
       const gameKeys = Object.keys(games);
 
       if (gameKeys.length === 0) {
-        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent, isEvenueEvent, isTickPickEvent);
+        showEmpty(detected);
         return;
       }
 
@@ -224,6 +250,9 @@ function loadData() {
       } else if (tpEventId) {
         const tpKey = `tickpick:${tpEventId}`;
         if (games[tpKey]) activeKey = tpKey;
+      } else if (axsEventId) {
+        const axsKey = `axs:${axsEventId}`;
+        if (games[axsKey]) activeKey = axsKey;
       } else if (tabPerfId) {
         const preferred = `${tabSite}:${tabPerfId}`;
         const other = `${tabSite === "lms" ? "resale" : "lms"}:${tabPerfId}`;
@@ -234,12 +263,14 @@ function loadData() {
       if (!activeKey && tabPerfId && games[tabPerfId]) {
         activeKey = tabPerfId;
       }
-      if (!activeKey && !isTicketmasterEvent && !isSeatGeekEvent && !isStubHubEvent && !isEvenueEvent && !isTickPickEvent) activeKey = gameKeys[0];
+      // On a recognised event page, never fall back to a cached game from
+      // somewhere else: an empty state is honest, stale data is not.
+      if (!activeKey && !isTicketmasterEvent && !detected.passive) activeKey = gameKeys[0];
 
       const game = activeKey ? games[activeKey] : null;
 
       if (!game || Object.keys(game.seats || {}).length === 0) {
-        showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent, isEvenueEvent, isTickPickEvent);
+        showEmpty(detected);
         return;
       }
 
@@ -258,21 +289,19 @@ function loadData() {
   });
 }
 
-function showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, isStubHubEvent, isEvenueEvent, isTickPickEvent) {
+function showEmpty(detected) {
+  const isFifaSite = detected.fifaSite;
+  const isSeatMap = detected.seatMap;
+  const isTicketmasterEvent = detected.ticketmaster;
+  const passive = detected.passive;
+
   document.getElementById("noData").style.display = "block";
   document.getElementById("dashboard").style.display = "none";
   document.getElementById("liveBadge").style.display = "none";
 
   // No game is loaded here, so brand off the tab we're sitting on rather than
   // `currentSite` — that still holds whichever site was last rendered.
-  setBrand(
-    isTicketmasterEvent ? "ticketmaster"
-    : isSeatGeekEvent ? "seatgeek"
-    : isStubHubEvent ? "stubhub"
-    : isEvenueEvent ? "evenue"
-    : isTickPickEvent ? "tickpick"
-    : "resale"
-  );
+  setBrand(isTicketmasterEvent ? "ticketmaster" : (passive || "resale"));
 
   const title = document.getElementById("emptyTitle");
   const hint = document.getElementById("emptyHint");
@@ -291,32 +320,13 @@ function showEmpty(isFifaSite, isSeatMap, isTicketmasterEvent, isSeatGeekEvent, 
     const lmsBtn = document.getElementById("emptyActionLms");
     if (lmsBtn) lmsBtn.style.display = "none";
     scanningHelp.style.display = "none";
-  } else if (isSeatGeekEvent) {
-    // SeatGeek is passive capture, not an explicit scan — the listings arrive
-    // with the page's own request, so there is no button to press.
+  } else if (passive) {
+    // These sites are passive capture, not an explicit scan — inventory arrives
+    // with the page's own request, so there is no button to press, and the only
+    // thing that differs between them is the name in the hint.
     title.textContent = "Waiting for listings…";
-    hint.textContent = "Reload this SeatGeek event page and the tickets will be captured automatically.";
-    action.style.display = "none";
-    const lmsBtn = document.getElementById("emptyActionLms");
-    if (lmsBtn) lmsBtn.style.display = "none";
-    scanningHelp.style.display = "none";
-  } else if (isStubHubEvent) {
-    title.textContent = "Waiting for listings…";
-    hint.textContent = "Reload this StubHub event page and the tickets will be captured automatically.";
-    action.style.display = "none";
-    const lmsBtn = document.getElementById("emptyActionLms");
-    if (lmsBtn) lmsBtn.style.display = "none";
-    scanningHelp.style.display = "none";
-  } else if (isEvenueEvent) {
-    title.textContent = "Waiting for listings…";
-    hint.textContent = "Reload this Evenue event page and the seats will be captured automatically.";
-    action.style.display = "none";
-    const lmsBtn = document.getElementById("emptyActionLms");
-    if (lmsBtn) lmsBtn.style.display = "none";
-    scanningHelp.style.display = "none";
-  } else if (isTickPickEvent) {
-    title.textContent = "Waiting for listings…";
-    hint.textContent = "Reload this TickPick event page and the tickets will be captured automatically.";
+    hint.textContent = `Reload this ${PASSIVE_SITE_LABELS[passive] || passive} event page ` +
+      `and the ${passive === "evenue" ? "seats" : "tickets"} will be captured automatically.`;
     action.style.display = "none";
     const lmsBtn = document.getElementById("emptyActionLms");
     if (lmsBtn) lmsBtn.style.display = "none";
@@ -453,7 +463,7 @@ let currentSite = "resale";
 
 // Shared by the per-match site badge and the header brand below, so the two can
 // never disagree about what site the popup is showing.
-const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", tickpick: "TickPick", resale: "Resale" };
+const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", tickpick: "TickPick", axs: "AXS", resale: "Resale" };
 
 // The header follows the active site. `lms` and `resale` are both FIFA
 // properties, so they keep the original name.
@@ -469,6 +479,7 @@ const SITE_FILE_TAGS = {
   stubhub: "stubhub",
   evenue: "evenue",
   tickpick: "tickpick",
+  axs: "axs",
 };
 
 function siteFileTag(site) {
@@ -483,6 +494,18 @@ function siteFileTag(site) {
 // repeated imports layer over the original rather than over each other.
 const SHIPPED_VENUE_TIER_DATA = self.VENUE_TIER_DATA;
 
+// Sites whose inventory is read from the page's own network traffic rather
+// than a request we issue. The single list of which sites are passive: the
+// empty state and the reload-instead-of-scan path both read it, so adding a
+// site is one edit.
+const PASSIVE_SITE_LABELS = {
+  stubhub: "StubHub",
+  seatgeek: "SeatGeek",
+  evenue: "Evenue",
+  tickpick: "TickPick",
+  axs: "AXS",
+};
+
 const SITE_BRANDS = {
   lms: "FIFA Ticket Scout",
   resale: "FIFA Ticket Scout",
@@ -491,6 +514,7 @@ const SITE_BRANDS = {
   stubhub: "StubHub Scout",
   evenue: "Evenue Scout",
   tickpick: "TickPick Scout",
+  axs: "AXS Scout",
 };
 
 function setBrand(site) {
@@ -1419,7 +1443,7 @@ function compareVersions(a, b) {
 // tickpick stores `p`, the per-ticket price the listing quotes. TickPick
 // advertises all-in pricing so 1.0 is expected to be right, but that has not
 // been checked against a checkout page.
-const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0 };
+const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0 };
 
 // Flat per-ticket fee, added after the multiplier. Percentage fees alone could
 // not describe Evenue: its price-level table quotes a base price and the site
@@ -1438,7 +1462,7 @@ const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seat
 // per-SITE value being used for what is really a per-VENUE one. If it needs to
 // vary, scan_config (already fetched from Supabase) can carry it without a
 // release.
-const FEE_FLAT_BY_SITE = { resale: 0, lms: 0, ticketmaster: 0, seatgeek: 0, stubhub: 0, evenue: 5.00, tickpick: 0 };
+const FEE_FLAT_BY_SITE = { resale: 0, lms: 0, ticketmaster: 0, seatgeek: 0, stubhub: 0, evenue: 5.00, tickpick: 0, axs: 0 };
 
 function centsToUSD(cents) {
   const multiplier = FEE_MULTIPLIER_BY_SITE[currentSite] ?? 1.15;
@@ -2420,7 +2444,7 @@ function handleSaveAlerts() {
 // Sites whose inventory is read from the page's OWN network traffic rather
 // than a request we issue. There is no scan to start on these: injected.js
 // captures whatever the page fetches. Reloading the tab is what re-runs it.
-const PASSIVE_CAPTURE_SITES = ["stubhub", "seatgeek", "evenue", "tickpick"];
+const PASSIVE_CAPTURE_SITES = Object.keys(PASSIVE_SITE_LABELS);
 
 function startScan() {
   getCurrentTabUrl().then((url) => {
@@ -2432,7 +2456,7 @@ function startScan() {
     // extension can detect the game IDs" — a message about a mechanism that
     // does not apply to them.
     if (PASSIVE_CAPTURE_SITES.includes(tabSite)) {
-      const label = { stubhub: "StubHub", seatgeek: "SeatGeek", evenue: "Evenue", tickpick: "TickPick" }[tabSite];
+      const label = PASSIVE_SITE_LABELS[tabSite];
       console.log(`[FIFA Scout] ${label} uses passive capture — reloading the tab to re-read its listings`);
 
       scanStartTime = Date.now();

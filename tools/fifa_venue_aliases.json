@@ -16,7 +16,6 @@
     "Entries whose canonical name is confirmed against a live page should be moved",
     "into the verified list below."
   ],
-
   "unverified": {
     "new york new jersey stadium": "metlife stadium",
     "dallas stadium": "at&t stadium",
@@ -44,6 +43,8 @@
     "monterrey stadium": "estadio bbva",
     "estadio bbva bancomer": "estadio bbva"
   },
-
-  "verified": {}
+  "verified": {
+    "bryant denny stadium": "saban field at bryant-denny stadium",
+    "bryant-denny stadium": "saban field at bryant-denny stadium"
+  }
 }
