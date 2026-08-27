@@ -128,6 +128,25 @@ async function getCurrentTabUrl() {
   } catch { return ""; }
 }
 
+// Ticketmaster uses TWO id formats, and this code only knew the older one:
+//   legacy hex   /event/0F006482E69174BF
+//   current      /event/Z7r9jZ1A7qIaF     <- alphanumeric, mixed case
+// An [A-F0-9] class cannot match "Z7r9jZ1A7qIaF", so current-format events
+// reported "no event ID" and the adapter sat idle. 8+ characters keeps a
+// short path segment from being mistaken for an id.
+const TM_EVENT_ID_RE = /\/event\/([A-Za-z0-9]{8,})/;
+
+function ticketmasterEventIdFromUrl(url) {
+  if (!/ticketmaster\.com/.test(url)) return null;
+  const path = url.match(TM_EVENT_ID_RE);
+  if (path) return path[1];
+  for (const key of ["eventId", "event_id", "eventid", "id", "event"]) {
+    const m = url.match(new RegExp("[?&]" + key + "=([A-Za-z0-9]{8,})(?:[&#]|$)", "i"));
+    if (m) return m[1];
+  }
+  return null;
+}
+
 function siteFromUrl(url) {
   try {
     const h = new URL(url).hostname;
@@ -148,8 +167,12 @@ function loadData() {
     const isFifaSite = /\.tickets\.fifa\.com/.test(url);
     const isTicketmasterSite = /ticketmaster\.com/.test(url);
     const isSeatMap = isFifaSite && (/perfId=/.test(url) || /\/seat\//.test(url) || /\/performance\/\d+/.test(url));
-    const tmEventMatch = isTicketmasterSite && url.match(/\/event\/([A-F0-9]+)/i);
-    const tmEventId = tmEventMatch ? tmEventMatch[1] : null;
+    // Mirrors getTicketmasterEventId() in ticketmaster-adapter.js for the
+    // url-based shapes. The adapter also reads the canonical link and JSON-LD,
+    // which the popup cannot see — on a page where the id exists only in the
+    // DOM the adapter will scan but the popup will not recognise the page.
+    const tmEventId = ticketmasterEventIdFromUrl(url);
+    const tmEventMatch = tmEventId;
     const isTicketmasterEvent = !!tmEventId;
     // SeatGeek event ids are the trailing numeric path segment — same rule the
     // adapter uses. See getSeatGeekEventId() in seatgeek-adapter.js.
@@ -2486,8 +2509,7 @@ function startScan() {
 
     if (tabSite === "ticketmaster") {
       // Ticketmaster scan
-      const eventIdMatch = url.match(/\/event\/([A-F0-9]+)/i);
-      const eventId = eventIdMatch ? eventIdMatch[1] : null;
+      const eventId = ticketmasterEventIdFromUrl(url);
       
       if (!eventId) {
         alert("Could not find event ID. Navigate to a Ticketmaster event page with a seating map.");

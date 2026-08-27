@@ -349,6 +349,17 @@
        EI.pageIdentity("https://www.stubhub.com/x/event/12345?quantity=4"),
        true, "pageIdentity ignores non-event query params");
 
+    // The same event reached by its short url and its canonical slug url.
+    // Ticketmaster serves both, and JSON-LD uses the slug form while the
+    // address bar often holds the short one.
+    eq(EI.pageIdentity("https://www.ticketmaster.com/event/Z7r9jZ1A7qIaF"),
+       EI.pageIdentity("https://www.ticketmaster.com/michigan-wolverines-football-vs-oklahoma-sooners-ann-arbor-09-12-2026/event/Z7r9jZ1A7qIaF"),
+       "a slug prefix does not make it a different event");
+    eq(EI.ldNodeIsStale(
+         { url: "https://www.ticketmaster.com/michigan-wolverines-football-vs-oklahoma-sooners-ann-arbor-09-12-2026/event/Z7r9jZ1A7qIaF" },
+         "https://www.ticketmaster.com/event/Z7r9jZ1A7qIaF"),
+       false, "the canonical slug url is not treated as a stale block");
+
     // Different events.
     eq(EI.pageIdentity("https://www.stubhub.com/x/event/12345") ===
        EI.pageIdentity("https://www.stubhub.com/x/event/99999"),
@@ -357,6 +368,13 @@
     eq(EI.pageIdentity("https://x.evenue.net/cgi-bin/ncommerce3?eventId=111") ===
        EI.pageIdentity("https://x.evenue.net/cgi-bin/ncommerce3?eventId=222"),
        false, "pageIdentity separates events that differ only by query param");
+    // Two segments still tells real events apart on a slug-heavy site.
+    eq(EI.pageIdentity("https://www.ticketmaster.com/a-slug/event/AAAAAAAA") ===
+       EI.pageIdentity("https://www.ticketmaster.com/a-slug/event/BBBBBBBB"),
+       false, "different ids under the same slug are different events");
+    eq(EI.pageIdentity("https://x.evenue.net/event/F26/01") ===
+       EI.pageIdentity("https://x.evenue.net/event/F26/02"),
+       false, "Evenue season/code pairs stay distinct");
 
     const page = "https://www.stubhub.com/team/event/12345";
     eq(EI.ldNodeIsStale({ url: "https://www.stubhub.com/team/event/99999" }, page),

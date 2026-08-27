@@ -12,16 +12,55 @@
   }
 
   // Extract event ID from Ticketmaster URL or page data
+  // Ticketmaster uses TWO id formats, and this code only knew the older one:
+  //   legacy hex   /event/0F006482E69174BF
+  //   current      /event/Z7r9jZ1A7qIaF     <- alphanumeric, mixed case
+  // An [A-F0-9] class cannot match "Z7r9jZ1A7qIaF", so current-format events
+  // reported "no event ID" and the adapter sat idle. 8+ characters keeps a
+  // short path segment from being mistaken for an id.
+  const TM_EVENT_ID = /\/event\/([A-Za-z0-9]{8,})/;
+
   function getTicketmasterEventId() {
     try {
-      // Try to get from URL: /event/0F006482E69174BF
-      const urlMatch = window.location.pathname.match(/\/event\/([A-F0-9]+)/i);
+      // 1. The usual shape: /event/0F006482E69174BF
+      const urlMatch = window.location.pathname.match(TM_EVENT_ID);
       if (urlMatch && urlMatch[1]) return urlMatch[1];
-      
-      // Try to get from page data (stored in window or meta tags)
+
+      // 2. Query string. Some flows (resale, VVS, affiliate links) land on a
+      //    path with no /event/ segment and carry the id as a parameter.
+      const qs = new URLSearchParams(window.location.search);
+      for (const key of ["eventId", "event_id", "eventid", "id", "event"]) {
+        const value = qs.get(key);
+        if (value && /^[A-Za-z0-9]{8,}$/.test(value)) return value;
+      }
+
+      // 3. The canonical link and og:url point at the real event page even when
+      //    the address bar does not.
+      const canonical = document.querySelector('link[rel="canonical"]');
+      const og = document.querySelector('meta[property="og:url"]');
+      for (const href of [canonical && canonical.href, og && og.content]) {
+        if (!href) continue;
+        const m = String(href).match(TM_EVENT_ID);
+        if (m) return m[1];
+      }
+
+      // 4. JSON-LD, which carries the event's own url.
+      for (const el of document.querySelectorAll('script[type="application/ld+json"]')) {
+        let parsed;
+        try { parsed = JSON.parse(el.textContent); } catch (e) { continue; }
+        const nodes = [].concat(parsed && parsed["@graph"] ? parsed["@graph"] : parsed || []);
+        for (const node of nodes) {
+          const url = node && (node.url || (node.offers && node.offers.url));
+          if (typeof url !== "string") continue;
+          const m = url.match(TM_EVENT_ID);
+          if (m) return m[1];
+        }
+      }
+
+      // 5. The original meta-tag fallback.
       const meta = document.querySelector('meta[property="eventid"]');
       if (meta?.content) return meta.content;
-      
+
       return null;
     } catch (e) {
       console.log("[TM] Error extracting event ID:", e.message);
@@ -200,7 +239,12 @@
       }
       if (++attempts >= MAX_ATTEMPTS) {
         clearInterval(checkReady);
-        console.log('[TM] No event ID on this page — adapter idle');
+        // Every other adapter logs the url it failed on; this one did not,
+        // which left "adapter idle" with nothing to act on.
+        console.log('[TM] No event ID on this page — adapter idle. Url was: ' +
+          window.location.href);
+        const canonical = document.querySelector('link[rel="canonical"]');
+        if (canonical) console.log('[TM] canonical link: ' + canonical.href);
       }
     }, 500);
   }

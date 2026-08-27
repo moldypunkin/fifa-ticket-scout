@@ -53,7 +53,20 @@
           extra.push(key.toLowerCase() + "=" + String(value).toLowerCase());
         }
       });
-      const path = u.pathname.replace(/\/+$/, "").toLowerCase();
+      // The LAST TWO path segments, not the whole path.
+      //
+      // The same event is reachable at both /event/Z7r9jZ1A7qIaF and
+      // /michigan-wolverines-football-vs-oklahoma-sooners-ann-arbor-09-12-2026/
+      // event/Z7r9jZ1A7qIaF, and JSON-LD carries the canonical slug form while
+      // the address bar often holds the short one. Comparing whole paths called
+      // that a different event and threw away the block — costing the venue,
+      // and with it the seat tiering.
+      //
+      // Two segments keeps the id and its preceding keyword ("event/<id>",
+      // "F26/01"), which is enough to tell two events apart without being
+      // fooled by a slug prefix.
+      const segments = u.pathname.split("/").filter(Boolean);
+      const path = segments.slice(-2).join("/").toLowerCase();
       return path + (extra.length ? "?" + extra.sort().join("&") : "");
     } catch (e) {
       return raw.toLowerCase();

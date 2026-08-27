@@ -143,6 +143,24 @@ Three separate debugging rounds in this project were spent analysing results pro
 
 The build prints the same value, so the question is answered by comparison rather than inference. The hash is taken with the stamp line itself blanked out, so unchanged content keeps the same stamp instead of the value chasing its own tail — verified stable across three consecutive rebuilds.
 
+### Fix: A Canonical Slug Url Read as a Different Event
+
+The JSON-LD staleness check compared whole url paths, and Ticketmaster serves the same event at both `/event/Z7r9jZ1A7qIaF` and `/michigan-wolverines-football-vs-oklahoma-sooners-ann-arbor-09-12-2026/event/Z7r9jZ1A7qIaF`. JSON-LD carries the canonical slug form while the address bar often holds the short one, so the block was declared stale and thrown away — taking the event's date and venue with it, and with the venue the seat tiering.
+
+`pageIdentity()` now compares the last two path segments rather than the whole path. That keeps the id and the keyword before it (`event/<id>`, `F26/01`), which tells two events apart without being fooled by a slug prefix. Covered both ways: a slug prefix no longer separates one event from itself, and two different ids under the same slug remain distinct.
+
+### Ticketmaster: Find the Event Id on More Page Shapes
+
+A Ticketmaster page reported `No event ID on this page — adapter idle`, and unlike every other adapter this one did not log the url it had failed on, so there was nothing to act on. It does now, along with the canonical link.
+
+**Ticketmaster uses two id formats and this code only knew the older one.** A live Michigan Stadium event is `/event/Z7r9jZ1A7qIaF` — alphanumeric and mixed case — while the code matched `[A-F0-9]`, which cannot contain `Z`, `j` or `q`. Every current-format event therefore reported "no event ID" and the adapter sat idle. Both formats are now accepted, at 8+ characters so a short path segment cannot be mistaken for an id.
+
+Extraction only ever looked at `/event/<hex>` in the path plus one meta tag. It now also reads the id from the query string (`eventId`, `event_id`, `id`, `event`), from the canonical link and `og:url`, and from JSON-LD — a resale or VVS flow can land on a path with no `/event/` segment while the real event page is still named in the markup. Ids must be 12+ hex characters so a short path segment or tracking value cannot be mistaken for one, which the previous `[A-F0-9]+` would have accepted.
+
+The popup mirrors the url-based shapes through a shared `ticketmasterEventIdFromUrl()`, used by both the page detection and the scan button so they cannot drift apart.
+
+One limitation worth stating: the popup can only see the tab's url. On a page where the id exists solely in the DOM, the adapter will resolve it but the popup will not recognise the page, so the empty state and the scan button stay inert. Closing that needs the adapter's resolved id relayed through to the popup, which is not wired up.
+
 ### Fix: Popup Froze After About a Dozen Events
 
 `enforceGameLimit()` only bounded storage for free users; licensed ones kept every event they had ever opened. Each capture rewrites the whole `games` object, and a single StubHub sweep produces a dozen or more captures — so by roughly the thirteenth event the extension was serialising megabytes of seat data on every response and locking up. `chrome.storage.local` is a 10MB quota without the `unlimitedStorage` permission, which this extension does not request.
