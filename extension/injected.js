@@ -9,7 +9,7 @@
   // Three debugging rounds in this project were spent on results produced by a
   // build that had not been reloaded, which is indistinguishable from a change
   // that did not work. Compare this against what package.py prints.
-  const BUILD_STAMP = "2750c425";
+  const BUILD_STAMP = "f0704a95";
   
   // Detect which ticketing site we're on
   const isTicketmaster = window.location.hostname.includes('ticketmaster.com');
@@ -141,7 +141,15 @@
         `${capStats.matched} matched ${JSON.stringify(MATCH_PATTERNS)}, ` +
         `${capStats.parsed} parsed as JSON, ${capStats.notJson} not JSON, ` +
         `${capStats.posted} sent to the service worker`);
-      if (capStats.matched === 0) {
+      if (isTicketmaster) {
+        // Ticketmaster is scan-only: MATCH_PATTERNS is deliberately empty and
+        // nothing is ever passively captured, so "nothing matched" is the
+        // designed behaviour rather than a fault. Saying "the inventory
+        // endpoint is not covered" here sent two debugging rounds after a
+        // problem that did not exist.
+        console.log(`[${SITE_TAG}] passive capture is off on Ticketmaster by design — ` +
+          `inventory comes from the scan, not from watching the page.`);
+      } else if (capStats.matched === 0) {
         console.log(`[${SITE_TAG}] nothing matched ${JSON.stringify(MATCH_PATTERNS)} — the ` +
           `inventory endpoint is not covered by it.`);
         reportCandidates();
@@ -184,11 +192,21 @@
   const candidates = new Map();   // path -> largest byte length seen
 
   function recordCandidate(url, response) {
-    if (!isPassiveSite) return;
+    // Ticketmaster never passively captures — it is scan-only — but on an event
+    // where Ticketmaster is the RESELLER rather than the primary seller, the
+    // ISMDS facets endpoint 404s and the inventory lives somewhere else
+    // entirely (the TMOL/VVS resale system). Recording candidates there costs
+    // one clone per response and is the only way to see where.
+    if (!isPassiveSite && !isTicketmaster) return;
     if (capStats.matched > 0 && !isUnconfirmedSite) return;
     if (candidates.size >= MAX_CANDIDATES) return;
     const clean = String(url).split("?")[0];
     if (PROBE_SKIP.test(clean)) return;
+    // The Ticketmaster facets response is the known-good inventory endpoint and
+    // runs to well over a megabyte. Ranking it means cloning and reading all of
+    // it on every scan to learn something already known, so skip it: the point
+    // of the ranking here is to find where inventory hides when facets fails.
+    if (isTicketmaster && /\/facets/.test(clean)) return;
     // Content type is recorded, not required. Evenue (Paciolan) is a legacy CGI
     // platform whose inventory can arrive as server-rendered HTML, so a
     // JSON-only filter would go blind on exactly the site most likely to need
@@ -247,7 +265,7 @@
   // inventory endpoint; null once that site is parsed.
   const DISCOVERY_SITE = null;
   const PROBE_MIN_CHARS = 2000;
-  const PROBE_SKIP = /google|doubleclick|datadog|forter|riskified|openai|reddit|yimg|adsrvr|boomtrain|iteratehq|datadome|newrelic|segment|branch\.io|qualtrics|vggcdn|cloudfront|akamai|\.geojson|map-sprites|svgnew|sprite|mapbox|\.png|\.jpg|\.svg|\.woff|\.pbf|\.css|field_images|\/glyphs\//i;
+  const PROBE_SKIP = /google|doubleclick|datadog|forter|riskified|openai|reddit|yimg|adsrvr|boomtrain|iteratehq|datadome|newrelic|segment|branch\.io|qualtrics|vggcdn|cloudfront|akamai|cookielaw|onetrust|\.geojson|map-sprites|svgnew|sprite|mapbox|\.png|\.jpg|\.svg|\.woff|\.pbf|\.css|field_images|\/glyphs\//i;
   // path -> largest payload already reported for it. StubHub reuses ONE path
   // for both the full inventory and small filtered queries (the query string
   // carries sections/rows/quantity), so deduping on the bare path hides the
@@ -1033,7 +1051,7 @@
     countResponse(willCapture);
     // On an unconfirmed site everything is a candidate, including the
     // responses that did match — the match means nothing until a parser exists.
-    if (!willCapture || isUnconfirmedSite) recordCandidate(url, response);
+    if (!willCapture || isUnconfirmedSite || isTicketmaster) recordCandidate(url, response);
 
     if (willCapture) {
       try {
@@ -1176,12 +1194,22 @@
       const facetsData = await window.__ticketmasterAdapter.fetchFacets(eventId, token, correlationId);
 
       if (!facetsData) {
-        console.log("[FIFA Ticket Scout] Ticketmaster facets request returned no data");
+        // A 404 here usually means the event is not served by ISMDS at all
+        // rather than that the id is wrong: on events where Ticketmaster is the
+        // RESELLER rather than the primary seller, inventory lives in the
+        // TMOL/VVS resale system, which this scan does not read. Say that,
+        // rather than the flat "no data" that reads like a bug.
+        console.log(`[TM] facets returned nothing for ${eventId} (${eventId.length} chars). ` +
+          `If the request 404'd, either the id is wrong — compare it against the ` +
+          `url logged above — or Ticketmaster is only reselling this event, in ` +
+          `which case its inventory is not in ISMDS and the candidate ranking ` +
+          `below shows where it actually is.`);
         window.postMessage({
           type: "FIFA_TICKET_SCOUT_SCAN_ERROR",
           eventId,
           performanceId: eventId,
-          error: "No data returned from Ticketmaster",
+          error: "Ticketmaster returned no inventory for this event — it may be a " +
+            "resale-only listing, which is served by a different system.",
         }, "*");
         return;
       }

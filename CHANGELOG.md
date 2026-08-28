@@ -153,6 +153,8 @@ The JSON-LD staleness check compared whole url paths, and Ticketmaster serves th
 
 A Ticketmaster page reported `No event ID on this page — adapter idle`, and unlike every other adapter this one did not log the url it had failed on, so there was nothing to act on. It does now, along with the canonical link.
 
+**Ticketmaster ids can contain hyphens.** `Z7r9jZ1A7-3jg` was truncated to `Z7r9jZ1A7` — a nine-character value that looks like a plausible id and 404s on the facets endpoint, while Ticketmaster's own request used the full hyphenated one. Only visible because the adapter now logs the url and the id length beside the id it resolved; before that, a truncated id and an unsupported event were the same symptom.
+
 **Ticketmaster uses two id formats and this code only knew the older one.** A live Michigan Stadium event is `/event/Z7r9jZ1A7qIaF` — alphanumeric and mixed case — while the code matched `[A-F0-9]`, which cannot contain `Z`, `j` or `q`. Every current-format event therefore reported "no event ID" and the adapter sat idle. Both formats are now accepted, at 8+ characters so a short path segment cannot be mistaken for an id.
 
 Extraction only ever looked at `/event/<hex>` in the path plus one meta tag. It now also reads the id from the query string (`eventId`, `event_id`, `id`, `event`), from the canonical link and `og:url`, and from JSON-LD — a resale or VVS flow can land on a path with no `/event/` segment while the real event page is still named in the markup. Ids must be 12+ hex characters so a short path segment or tracking value cannot be mistaken for one, which the previous `[A-F0-9]+` would have accepted.

@@ -18,7 +18,11 @@
   // An [A-F0-9] class cannot match "Z7r9jZ1A7qIaF", so current-format events
   // reported "no event ID" and the adapter sat idle. 8+ characters keeps a
   // short path segment from being mistaken for an id.
-  const TM_EVENT_ID = /\/event\/([A-Za-z0-9]{8,})/;
+  // Ticketmaster ids also contain hyphens ("Z7r9jZ1A7-3jg"), which an
+  // alphanumeric-only class truncates to "Z7r9jZ1A7" — a plausible-looking id
+  // that 404s. Confirmed against a live event whose own VVS request used the
+  // full hyphenated value.
+  const TM_EVENT_ID = /\/event\/([A-Za-z0-9_-]{8,})/;
 
   function getTicketmasterEventId() {
     try {
@@ -31,7 +35,7 @@
       const qs = new URLSearchParams(window.location.search);
       for (const key of ["eventId", "event_id", "eventid", "id", "event"]) {
         const value = qs.get(key);
-        if (value && /^[A-Za-z0-9]{8,}$/.test(value)) return value;
+        if (value && /^[A-Za-z0-9_-]{8,}$/.test(value)) return value;
       }
 
       // 3. The canonical link and og:url point at the real event page even when
@@ -227,7 +231,11 @@
       const eventId = getTicketmasterEventId();
       if (eventId) {
         clearInterval(checkReady);
-        console.log(`[TM] Event ID found: ${eventId}`);
+        // The url too: an id that looks plausible but is truncated, or came
+        // from the wrong source, is otherwise indistinguishable from a good one
+        // until the facets request 404s.
+        console.log(`[TM] Event ID found: ${eventId} (${eventId.length} chars) ` +
+          `from ${window.location.href}`);
 
         // Notify content script that adapter is ready
         window.postMessage({

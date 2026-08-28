@@ -134,14 +134,18 @@ async function getCurrentTabUrl() {
 // An [A-F0-9] class cannot match "Z7r9jZ1A7qIaF", so current-format events
 // reported "no event ID" and the adapter sat idle. 8+ characters keeps a
 // short path segment from being mistaken for an id.
-const TM_EVENT_ID_RE = /\/event\/([A-Za-z0-9]{8,})/;
+// Ticketmaster ids also contain hyphens ("Z7r9jZ1A7-3jg"), which an
+// alphanumeric-only class truncates to "Z7r9jZ1A7" — a plausible-looking id
+// that 404s. Confirmed against a live event whose own VVS request used the
+// full hyphenated value.
+const TM_EVENT_ID_RE = /\/event\/([A-Za-z0-9_-]{8,})/;
 
 function ticketmasterEventIdFromUrl(url) {
   if (!/ticketmaster\.com/.test(url)) return null;
   const path = url.match(TM_EVENT_ID_RE);
   if (path) return path[1];
   for (const key of ["eventId", "event_id", "eventid", "id", "event"]) {
-    const m = url.match(new RegExp("[?&]" + key + "=([A-Za-z0-9]{8,})(?:[&#]|$)", "i"));
+    const m = url.match(new RegExp("[?&]" + key + "=([A-Za-z0-9_-]{8,})(?:[&#]|$)", "i"));
     if (m) return m[1];
   }
   return null;

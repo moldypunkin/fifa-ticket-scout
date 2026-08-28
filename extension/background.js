@@ -87,12 +87,34 @@ function bgLog(...args) {
   }).join(" ");
   console.log(msg);
   bgPendingLogs.push(`[${new Date().toISOString()}] ${msg}`);
+  mirrorToPage(msg);
   if (bgPendingLogs.length >= 50) {
     clearTimeout(bgLogTimer);
     bgFlushLogs();
   } else if (!bgLogTimer) {
     bgLogTimer = setTimeout(bgFlushLogs, 1000);
   }
+}
+
+// Also print into the active tab's console.
+//
+// The service worker logs to its own DevTools window, behind
+// chrome://extensions -> "service worker", which nobody thinks to open — so
+// the line that says whether a scan actually parsed anything was invisible to
+// the person watching the page console. Mirror it to where they are looking.
+// Best-effort: no listener, no tab, or an orphaned content script all fail
+// silently, and the line is still in Download Logs either way.
+function mirrorToPage(msg) {
+  try {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      void chrome.runtime.lastError;
+      const tab = tabs && tabs[0];
+      if (!tab || tab.id == null) return;
+      chrome.tabs.sendMessage(tab.id, { type: "BG_LOG", line: msg }, () => {
+        void chrome.runtime.lastError;
+      });
+    });
+  } catch (e) { /* never let logging break anything */ }
 }
 
 // A compact description of an unknown payload, for the log. Names the shape
@@ -212,7 +234,7 @@ async function getSharedCategories(force) {
         .sharedVenueCategories;
       if (cached && cached.data) return cached.data;
     } catch (inner) { /* nothing cached */ }
-    console.log("[background] shared categories unavailable:", e && e.message);
+    bgLog("[background] shared categories unavailable:", e && e.message);
     return null;
   }
 }
@@ -700,12 +722,30 @@ async function processApiResponse(url, body, tabId, eventInfo) {
   }
 
   // Ticketmaster facets
-  if (site === "ticketmaster" && url.includes("/api/ismds/event/") && body.facets) {
-    const eventIdMatch = url.match(/\/event\/([A-F0-9]+)/i);
+  if (site === "ticketmaster" && url.includes("/api/ismds/event/")) {
+    // Same id rule as the adapter and the popup. This was [A-F0-9]+, which
+    // matches nothing in "Z7r9jZ1A7-3jg" — so eventId came back null, the
+    // branch did nothing, and because every log lives inside the save function
+    // the service worker console stayed completely empty. A silent skip is the
+    // worst possible failure: it looks identical to the message never arriving.
+    const eventIdMatch = url.match(/\/event\/([A-Za-z0-9_-]{8,})/);
     const eventId = eventIdMatch ? eventIdMatch[1] : null;
-    if (eventId) {
+
+    // hal+json nests the payload, so accept either shape.
+    const facets = body && (Array.isArray(body.facets) ? body.facets
+      : (body._embedded && Array.isArray(body._embedded.facets) ? body._embedded.facets : null));
+
+    if (eventId && facets) {
       await enforceGameLimit(`${site}:${eventId}`);
-      await saveTicketmasterSeats(eventId, body, tabId, site, eventInfo);
+      await saveTicketmasterSeats(eventId, Object.assign({}, body, { facets }),
+        tabId, site, eventInfo);
+    } else {
+      // Never skip in silence again: say which half was missing, and what the
+      // payload actually looked like.
+      bgLog(`[background] Ticketmaster: not parsed — ` +
+        `${eventId ? `id ${eventId}` : "NO event id from " + url.split("?")[0]}, ` +
+        `${facets ? `${facets.length} facets` : "NO facets array"}. ` +
+        `Payload was ${describeShape(body, 3)}`);
     }
   }
 
@@ -1020,13 +1060,33 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
   // block/row/seat must be strings — the cluster sort calls localeCompare.
   const seats = {};
   let missingPrice = 0;
+  const offerSpread = [];
   try {
     for (const facet of facetsData.facets) {
       if (facet.available === false) continue;
 
       const area = descriptions[facet.description] || "";
       const category = (facet.inventoryTypes || [])[0] || "standard";
-      const dollars = facetListPrice(facet) ?? offerPrices[(facet.offers || [])[0]] ?? null;
+      // A facet can carry several offers — primary and resale, different
+      // delivery or quantity rules — at different prices, and taking
+      // `offers[0]` picked one arbitrarily. Use the DEAREST instead: these are
+      // all-in prices, so the higher figure is what someone actually pays, and
+      // reading low is the more misleading error for a buyer. `offerSpread`
+      // below counts how often they disagree — on a live event it never fired,
+      // so this rarely changes the number.
+      const offerIds = Array.isArray(facet.offers) ? facet.offers : [];
+      const offerCandidates = offerIds
+        .map((id) => offerPrices[id])
+        .filter((n) => typeof n === "number" && isFinite(n) && n > 0);
+      if (offerCandidates.length > 1) {
+        const lo = Math.min.apply(null, offerCandidates);
+        const hi = Math.max.apply(null, offerCandidates);
+        if (lo !== hi) {
+          offerSpread.push(`${offerCandidates.length} offers ${lo}-${hi}`);
+        }
+      }
+      const dollars = facetListPrice(facet)
+        ?? (offerCandidates.length ? Math.max.apply(null, offerCandidates) : null);
       // Stored in thousandths to match centsToUSD() in the popup.
       const price = dollars != null ? Math.round(dollars * 1000) : null;
       if (price == null) missingPrice++;
@@ -1055,11 +1115,63 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
       }
     }
   } catch (error) {
-    console.log("[background] Error parsing Ticketmaster facets:", error.message);
+    bgLog("[background] Error parsing Ticketmaster facets:", error.message);
   }
 
   const total = Object.keys(seats).length;
-  console.log(`[background] Ticketmaster: ${total} seats parsed` +
+  // Why a price can be wrong, reported once per scan.
+  //
+  // Two candidates, and only the payload distinguishes them: `listPriceRange`
+  // may be the LIST price while the site shows an all-in price, and a facet
+  // whose range has min != max gets `min` applied to every seat in it.
+  try {
+    const priced = (facetsData.facets || []).filter((f) => Array.isArray(f.listPriceRange) && f.listPriceRange.length);
+    const spread = priced.filter((f) => {
+      const r = f.listPriceRange.find((x) => x && x.currency === "USD") || f.listPriceRange[0];
+      return r && r.min != null && r.max != null && r.min !== r.max;
+    });
+    if (offerSpread.length) {
+      bgLog(`[background] Ticketmaster prices: ${offerSpread.length} facet(s) carry offers ` +
+        `at DIFFERENT prices — the dearest is used, so a seat sold under a cheaper ` +
+        `offer will read high. e.g. ${offerSpread.slice(0, 3).join("; ")}`);
+    }
+
+    if (!priced.length) {
+      // No facet carries a listPriceRange, so every price came from the offer
+      // map — which picks the first plausibly-named numeric field it finds.
+      // That is exactly how a price ends up close but wrong. Name the fields
+      // that actually exist so the right one can be chosen instead of guessed.
+      const offers = (facetsData._embedded && facetsData._embedded.offer) || [];
+      bgLog(`[background] Ticketmaster prices: NO facet has listPriceRange — ` +
+        `all prices came from the offer map (${offers.length} offer(s) embedded), ` +
+        `which guesses at field names.`);
+      const offer = offers[0];
+      if (offer) {
+        const numeric = Object.keys(offer).filter((k) => typeof offer[k] === "number");
+        const nested = Object.keys(offer).filter((k) => offer[k] && typeof offer[k] === "object");
+        bgLog(`[background] Ticketmaster prices: offer numeric fields: ` +
+          numeric.map((k) => `${k}=${offer[k]}`).join(", ") || "(none)");
+        nested.forEach((k) => {
+          bgLog(`[background] Ticketmaster prices: offer.${k} = ` +
+            JSON.stringify(offer[k]).slice(0, 300));
+        });
+      }
+    }
+
+    const sample = priced[0];
+    if (sample) {
+      const priceKeys = Object.keys(sample).filter((k) => /price|amount|fee|total/i.test(k));
+      bgLog(`[background] Ticketmaster prices: ${priced.length} facet(s) with a range, ` +
+        `${spread.length} where min != max (those get min applied to every seat). ` +
+        `Price-ish fields on a facet: ${priceKeys.join(", ") || "(none)"}`);
+      priceKeys.forEach((k) => {
+        bgLog(`[background] Ticketmaster prices: sample ${k} = ` +
+          `${JSON.stringify(sample[k]).slice(0, 300)}`);
+      });
+    }
+  } catch (e) { /* diagnostics must never break a scan */ }
+
+  bgLog(`[background] Ticketmaster: ${total} seats parsed` +
     (missingPrice ? `, ${missingPrice} facets had no resolvable price` : ""));
 
   games[gameKey].seats = { ...games[gameKey].seats, ...seats };
@@ -1169,11 +1281,11 @@ async function saveSeatGeekSeats(eventId, body, tabId, site, eventInfo) {
       });
     }
   } catch (error) {
-    console.log("[background] Error parsing SeatGeek listings:", error.message);
+    bgLog("[background] Error parsing SeatGeek listings:", error.message);
   }
 
   const total = Object.keys(seats).length;
-  console.log(`[background] SeatGeek: ${total} seats from ${body.listings.length} listings` +
+  bgLog(`[background] SeatGeek: ${total} seats from ${body.listings.length} listings` +
     (missingPrice ? `, ${missingPrice} had no price` : "") +
     (seatless ? `, ${seatless} had no seat numbers` : ""));
 
@@ -1323,11 +1435,11 @@ async function saveStubHubSeats(eventId, body, tabId, site, eventInfo) {
       });
     }
   } catch (error) {
-    console.log("[background] Error parsing StubHub listings:", error.message);
+    bgLog("[background] Error parsing StubHub listings:", error.message);
   }
 
   const total = Object.keys(seats).length;
-  console.log(`[background] StubHub: ${total} seats from ${body.items.length} listings` +
+  bgLog(`[background] StubHub: ${total} seats from ${body.items.length} listings` +
     (missingPrice ? `, ${missingPrice} had no price` : "") +
     (seatless ? `, ${seatless} had no seat numbers` : ""));
 
@@ -1760,7 +1872,7 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
       };
     }
   } catch (error) {
-    console.log("[background] Error parsing Evenue seats:", error.message);
+    bgLog("[background] Error parsing Evenue seats:", error.message);
   }
 
   const total = Object.keys(seats).length;
@@ -1932,11 +2044,11 @@ async function saveTickPickSeats(eventId, body, tabId, site, eventInfo) {
       }
     }
   } catch (error) {
-    console.log("[background] Error parsing TickPick listings:", error.message);
+    bgLog("[background] Error parsing TickPick listings:", error.message);
   }
 
   const total = Object.keys(seats).length;
-  console.log(`[background] TickPick: ${total} seats from ${body.listings.length} listings` +
+  bgLog(`[background] TickPick: ${total} seats from ${body.listings.length} listings` +
     (parking ? `, ${parking} parking excluded` : "") +
     (missingPrice ? `, ${missingPrice} had no price` : ""));
 

@@ -212,6 +212,13 @@ window.addEventListener("message", (event) => {
 
 // Listen for scan commands from background
 chrome.runtime.onMessage.addListener((message) => {
+  // Service-worker output, echoed into this page's console so the whole
+  // pipeline reads in one place instead of two DevTools windows.
+  if (message?.type === "BG_LOG") {
+    console.log(message.line);
+    return;
+  }
+
   if (message.type === "START_SCAN") {
     window.postMessage({
       type: "FIFA_TICKET_SCOUT_SCAN",
