@@ -1054,6 +1054,14 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
     }
   }
   const offerPrices = buildOfferPriceMap(facetsData);
+  // id -> the raw offer, for the cheapest-seat audit below.
+  const offerById = {};
+  for (const o of (facetsData?._embedded?.offer || [])) {
+    const id = o?.offerId || o?.id;
+    if (id) offerById[id] = o;
+  }
+  // What each facet's price was built from, so the cheapest can be explained.
+  const priceAudit = [];
 
   // Expand every facet into individual seats matching the shape the dashboard
   // already consumes: { block, row, seat, area, category, price, exclusive }.
@@ -1087,6 +1095,20 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
       }
       const dollars = facetListPrice(facet)
         ?? (offerCandidates.length ? Math.max.apply(null, offerCandidates) : null);
+      if (dollars != null) {
+        // Which offer supplied the figure we used.
+        let usedOfferId = null;
+        for (const id of offerIds) {
+          if (offerPrices[id] === dollars) { usedOfferId = id; break; }
+        }
+        priceAudit.push({
+          dollars,
+          source: facetListPrice(facet) != null ? "facet.listPriceRange" : "offer map",
+          offerId: usedOfferId,
+          section: String(facet.section || ""),
+          offerCount: offerIds.length,
+        });
+      }
       // Stored in thousandths to match centsToUSD() in the popup.
       const price = dollars != null ? Math.round(dollars * 1000) : null;
       if (price == null) missingPrice++;
@@ -1156,6 +1178,39 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
             JSON.stringify(offer[k]).slice(0, 300));
         });
       }
+    }
+
+    // The cheapest seats are what a user compares against the site, so dump
+    // the offers behind them in full rather than a sample from the top of the
+    // list. Reading LOW is the error that matters: it advertises a price that
+    // does not exist.
+    if (priceAudit.length) {
+      const cheapest = priceAudit.slice().sort((a, b) => a.dollars - b.dollars).slice(0, 3);
+      bgLog(`[background] Ticketmaster prices: cheapest ${cheapest.length} facet price(s) ` +
+        `and the offers behind them —`);
+      cheapest.forEach((entry, i) => {
+        bgLog(`[background]   #${i + 1} $${entry.dollars} section=${entry.section || "?"} ` +
+          `via ${entry.source}, ${entry.offerCount} offer(s) on the facet`);
+        const offer = entry.offerId ? offerById[entry.offerId] : null;
+        if (!offer) {
+          bgLog(`[background]      (no offer object — price came from the facet)`);
+          return;
+        }
+        const nums = Object.keys(offer)
+          .filter((k) => typeof offer[k] === "number")
+          .map((k) => `${k}=${offer[k]}`).join(", ");
+        bgLog(`[background]      numeric: ${nums || "(none)"}`);
+        if (offer.charges) {
+          const sum = (offer.charges || []).reduce((t, c) => t + (Number(c && c.amount) || 0), 0);
+          bgLog(`[background]      charges sum=${sum.toFixed(2)} :: ` +
+            JSON.stringify(offer.charges).slice(0, 240));
+        }
+        for (const k of ["sellableQuantities", "name", "description", "offerType", "type", "currency"]) {
+          if (offer[k] !== undefined) {
+            bgLog(`[background]      ${k}=${JSON.stringify(offer[k]).slice(0, 160)}`);
+          }
+        }
+      });
     }
 
     const sample = priced[0];
