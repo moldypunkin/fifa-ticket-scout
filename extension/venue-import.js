@@ -251,6 +251,29 @@
     return merged;
   }
 
+  // Layer a shared category set (the published venue_categories.json) over the
+  // shipped data. Whole venues replace whole venues: the shared file is
+  // generated from the same source as the shipped one, so a venue it names is
+  // the newer truth for that venue, and a venue it omits is left alone.
+  //
+  // Returns `base` untouched when there is nothing to apply, so a failed fetch
+  // costs nothing.
+  function applyShared(base, shared) {
+    const source = base || { aliases: {}, tiers: {}, sections: {} };
+    if (!shared || typeof shared !== "object") return source;
+
+    const hasSections = shared.sections && Object.keys(shared.sections).length;
+    const hasAliases = shared.aliases && Object.keys(shared.aliases).length;
+    if (!hasSections && !hasAliases) return source;
+
+    return {
+      version: shared.version != null ? shared.version : source.version,
+      aliases: Object.assign({}, source.aliases || {}, shared.aliases || {}),
+      tiers: Object.assign({}, source.tiers || {}, shared.tiers || {}),
+      sections: Object.assign({}, source.sections || {}, shared.sections || {}),
+    };
+  }
+
   // A short human summary of what an import covers, for the popup.
   function summarize(rows) {
     const venues = new Set();
@@ -272,5 +295,5 @@
     };
   }
 
-  root.VenueImport = { parse, applyOverlay, summarize, COLUMNS };
+  root.VenueImport = { parse, applyOverlay, applyShared, summarize, COLUMNS };
 })(typeof self !== "undefined" ? self : this);

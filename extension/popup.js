@@ -486,6 +486,15 @@ let currentSite = "resale";
 
 // Shared by the per-match site badge and the header brand below, so the two can
 // never disagree about what site the popup is showing.
+// Remote config lives in this repo, fetched at runtime so scan timing, the
+// update banner and the venue categories can change without a store release.
+//
+// This pointed at the UPSTREAM repo, not this fork: `version.json` there read
+// 2.2.0, which is below every version shipped here, so the update banner could
+// never fire — and upstream controlled this fork's scan timing. Anyone forking
+// again changes this one line.
+const CONFIG_REPO = "https://raw.githubusercontent.com/moldypunkin/fifa-ticket-scout/main";
+
 const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", tickpick: "TickPick", axs: "AXS", resale: "Resale" };
 
 // The header follows the active site. `lms` and `resale` are both FIFA
@@ -1240,11 +1249,17 @@ function renderBlockTable(seats) {
 // is never written to, so rebuilding it from the TicketPortal export cannot
 // clobber an import, and clearing an import restores it exactly.
 
+// Three layers, lowest first: what shipped in the build, the set published to
+// the repo (fetched and cached by background.js), then this browser's own
+// import. A local import wins for the venues it names; the shared set fills in
+// the rest. SHIPPED_VENUE_TIER_DATA is captured once, before any overlay, so
+// repeated imports layer over the original rather than over each other.
+let sharedCategories = null;
+
 function applyUserCategories(stored) {
   const rows = (stored && stored.rows) || [];
-  // SHIPPED_VENUE_TIER_DATA is captured once, before any overlay, so repeated
-  // imports layer over the original rather than over each other.
-  self.VENUE_TIER_DATA = VenueImport.applyOverlay(SHIPPED_VENUE_TIER_DATA, rows);
+  const base = VenueImport.applyShared(SHIPPED_VENUE_TIER_DATA, sharedCategories);
+  self.VENUE_TIER_DATA = VenueImport.applyOverlay(base, rows);
   return rows.length;
 }
 
@@ -1343,11 +1358,13 @@ function initCategoryImport() {
     reader.readAsText(file);
   });
 
-  chrome.storage.local.get("userVenueCategories", (data) => {
+  chrome.storage.local.get(["userVenueCategories", "sharedVenueCategories"], (data) => {
+    const cached = data && data.sharedVenueCategories;
+    sharedCategories = (cached && cached.data) || null;
     const stored = data && data.userVenueCategories;
     applyUserCategories(stored);
     renderImportStatus(stored);
-    if (stored && stored.rows && stored.rows.length) loadData();
+    if (sharedCategories || (stored && stored.rows && stored.rows.length)) loadData();
   });
 }
 
@@ -1426,7 +1443,7 @@ function exportCSV() {
 
 function checkForUpdate() {
   const current = chrome.runtime.getManifest().version;
-  fetch("https://raw.githubusercontent.com/david-dirring/fifa-ticket-scout/main/version.json")
+  fetch(`${CONFIG_REPO}/version.json`)
     .then(r => r.json())
     .then(data => {
       if (data.latest && compareVersions(data.latest, current) > 0) {

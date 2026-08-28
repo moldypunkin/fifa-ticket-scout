@@ -31,6 +31,9 @@ ROOT = os.path.dirname(HERE)
 EXPORT = os.path.join(HERE, "venue_tiers_export.json")
 ALIASES = os.path.join(HERE, "fifa_venue_aliases.json")
 TARGET = os.path.join(ROOT, "extension", "venue-tiers.js")
+# Fetched at runtime from the repo, so a mapping change reaches every
+# install without a store release. Same data as TARGET, as JSON.
+SHARED = os.path.join(ROOT, "venue_categories.json")
 
 HEADER = '''// Venue tier mapping data — consumed by tiers.js.
 //
@@ -605,7 +608,22 @@ def build():
     with io.open(TARGET, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("".join(out))
 
+    # The same data as JSON, for the runtime fetch. Committing and pushing this
+    # is what publishes a mapping change to everyone; the extension picks it up
+    # on next load without a new release.
+    shared = {
+        "version": 1,
+        "aliases": aliases,
+        "tiers": tiers,
+        "sections": sections,
+    }
+    with io.open(SHARED, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(shared, fh, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        fh.write("\n")
+
     print("Wrote %s" % os.path.relpath(TARGET, ROOT))
+    print("Wrote %s  (%.0f KB) — commit and push to publish to every install"
+          % (os.path.relpath(SHARED, ROOT), os.path.getsize(SHARED) / 1024.0))
     print("  aliases  %d (%d curated)" % (len(aliases), curated_count))
     print("  tiers    %d venues" % len(tiers))
     print("  sections %d venues, %d sections, %d rules (%d row bands)"

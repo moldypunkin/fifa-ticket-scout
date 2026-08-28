@@ -270,6 +270,24 @@ Sites whose endpoint is still unconfirmed now keep recording regardless of what 
 
 `showEmpty()` took seven positional booleans and was about to take an eighth, with four near-identical branches differing only in a site's name. It now takes a single `detected` object, and the passive sites share one branch driven by `PASSIVE_SITE_LABELS` — the single list of which sites are passive, also read by the reload-instead-of-scan path. Adding a site is now one entry rather than four parallel edits and a positional argument nobody can read.
 
+### Shared Venue Categories
+
+An import applied only to the browser it was done in. Categories can now be published to every install without a store release.
+
+`tools/build_venue_tiers.py` also writes `venue_categories.json` at the repo root, the same data as the shipped mapping in JSON (108 KB, 22 venues). Committing and pushing it is the publish step: the extension fetches it on load, caches it for an hour, and falls back to the cached copy — then to the shipped mapping — if the fetch fails. Nothing breaks when the repo is unreachable.
+
+Three layers, lowest first: **what shipped in the build**, then **the published set**, then **this browser's own import**. A local import wins for the venues it names, which keeps the Import button useful for a venue not yet published, and the published set fills in everything else. A venue in the published set replaces that venue wholesale rather than merging section by section, since both come from the same generator and the published one is the newer truth.
+
+### Fix: Remote Config Pointed at the Upstream Repo
+
+`scan_config.json` and `version.json` were fetched from `david-dirring/fifa-ticket-scout` — the upstream repo this one was forked from, not this fork. Two consequences, both live:
+
+The update banner could never fire. Upstream's `version.json` reads `2.2.0`, below every version shipped here, so the comparison always said "up to date" — and had upstream published a higher version, this fork's users would have been prompted to update to someone else's release.
+
+Upstream also controlled this fork's scan timing: the stealth/cautious/balanced delays, tile size and retry cooldown all came from their `scan_config.json`.
+
+Both now come from a single `CONFIG_REPO` constant, which the venue category file uses too. Forking again is a one-line change rather than three scattered URLs.
+
 ### Import Categories From the Popup
 
 An **Import Categories** button in the actions row takes the same CSV the build script does, so a venue can be mapped without touching the repo or rebuilding the extension. Below it, a line reports what is currently imported — sections, venues, row bands, and the venue names — with a **Remove** control that restores the built-in mapping.

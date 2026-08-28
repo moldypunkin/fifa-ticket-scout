@@ -503,6 +503,47 @@
     eq(Object.keys(overlay.sections).sort(), ["memorial stadium - ne", "michigan stadium"],
        "no extra venue is created by the import");
 
+    // ── shared set (venue_categories.json, fetched from the repo) ─────────
+    const shared = {
+      version: 42,
+      aliases: { "the big house": "michigan stadium", "u of m": "michigan stadium" },
+      tiers: { "michigan stadium": [{ tier: "Cat A - Shared", sort: 0 }] },
+      sections: {
+        "michigan stadium": { "1": [{ from: null, to: null, tier: "Cat A - Shared" }] },
+        "new venue": { "5": [{ from: null, to: null, tier: "Cat S - Only Shared" }] },
+      },
+    };
+
+    const layered = VI.applyShared(base, shared);
+    eq(layered.sections["michigan stadium"]["1"][0].tier, "Cat A - Shared",
+       "the shared set replaces a venue the build shipped");
+    eq(layered.sections["michigan stadium"]["2"], undefined,
+       "a venue is replaced wholesale, not merged section by section");
+    eq(layered.sections["new venue"]["5"][0].tier, "Cat S - Only Shared",
+       "the shared set can add a venue the build never had");
+    eq(layered.sections["memorial stadium - ne"]["9"][0].tier, "Cat Z - Nebraska",
+       "a venue the shared set omits is left alone");
+    eq(layered.aliases["the big house"], "michigan stadium", "shared aliases merge in");
+    eq(base.sections["michigan stadium"]["2"][0].tier, "Cat B - Old",
+       "applyShared does not mutate the shipped data");
+    eq(VI.applyShared(base, null) === base, true, "no shared set returns the base unchanged");
+    eq(VI.applyShared(base, { sections: {}, aliases: {} }) === base, true,
+       "an empty shared set returns the base unchanged");
+
+    // Precedence: shipped < shared < local import. A local import must win for
+    // the venues it names, or the Import button would be useless for a venue
+    // that has not been published yet.
+    const bothLayers = VI.applyOverlay(
+      VI.applyShared(base, shared),
+      VI.parse([
+        "venue,section,tier",
+        "Michigan Stadium,1,Cat A - Local Wins",
+      ].join("\n")).rows);
+    eq(bothLayers.sections["michigan stadium"]["1"][0].tier, "Cat A - Local Wins",
+       "a local import beats the shared set");
+    eq(bothLayers.sections["new venue"]["5"][0].tier, "Cat S - Only Shared",
+       "the shared set still fills in venues the import does not name");
+
     // The base must be untouched, or clearing an import could not restore it.
     eq(base.sections["michigan stadium"]["1"][0].tier, "Cat A - Old",
        "applyOverlay does not mutate the shipped data");

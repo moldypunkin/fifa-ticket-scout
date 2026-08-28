@@ -13,11 +13,17 @@ const SHIPPED_VENUE_TIER_DATA = self.VENUE_TIER_DATA;
 // Categories imported through the popup are layered on here too, so the `tier`
 // stamped onto seats at scan time agrees with what the popup renders. The
 // service worker restarts often, so this re-reads storage rather than caching.
+// Three layers, lowest first: what shipped in the build, the set published to
+// the repo, then this browser's own import. A local import therefore wins for
+// the venues it names — which keeps the Import button useful for a venue that
+// has not been published yet — and the shared set fills in everything else.
 async function applyUserCategories() {
   try {
+    const shared = await getSharedCategories(false);
+    const base = VenueImport.applyShared(SHIPPED_VENUE_TIER_DATA, shared);
     const data = await chrome.storage.local.get("userVenueCategories");
     const rows = (data && data.userVenueCategories && data.userVenueCategories.rows) || [];
-    self.VENUE_TIER_DATA = VenueImport.applyOverlay(SHIPPED_VENUE_TIER_DATA, rows);
+    self.VENUE_TIER_DATA = VenueImport.applyOverlay(base, rows);
     return rows.length;
   } catch (e) {
     return 0;
@@ -163,6 +169,53 @@ async function verifyKey(productId, licenseKey) {
 // ============================================================
 // SUPABASE SYNC — fire-and-forget data sync after each scan
 // ============================================================
+
+// Remote config lives in this repo, fetched at runtime so scan timing, the
+// update banner and the venue categories can change without a store release.
+//
+// This pointed at the UPSTREAM repo, not this fork: `version.json` there read
+// 2.2.0, which is below every version shipped here, so the update banner could
+// never fire — and upstream controlled this fork's scan timing. Anyone forking
+// again changes this one line.
+const CONFIG_REPO = "https://raw.githubusercontent.com/moldypunkin/fifa-ticket-scout/main";
+
+// How long a fetched category set is trusted before refetching. Venue mappings
+// change rarely and raw.githubusercontent caches for about five minutes
+// anyway, so hourly is already far more often than the data moves.
+const SHARED_CATEGORIES_TTL_MS = 60 * 60 * 1000;
+
+// Fetch the published category set, or return the cached copy. Never throws:
+// a failure just means the shipped mapping stays in use.
+async function getSharedCategories(force) {
+  try {
+    const cached = (await chrome.storage.local.get("sharedVenueCategories"))
+      .sharedVenueCategories;
+    const fresh = cached && cached.fetchedAt &&
+      (Date.now() - cached.fetchedAt) < SHARED_CATEGORIES_TTL_MS;
+    if (cached && fresh && !force) return cached.data;
+
+    const resp = await fetch(`${CONFIG_REPO}/venue_categories.json`, { cache: "no-cache" });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const data = await resp.json();
+    if (!data || !data.sections) throw new Error("no sections in the published file");
+
+    await chrome.storage.local.set({
+      sharedVenueCategories: { data, fetchedAt: Date.now() },
+    });
+    bgLog(`[background] shared categories: ${Object.keys(data.sections).length} venue(s) ` +
+      `fetched from the repo`);
+    return data;
+  } catch (e) {
+    // Fall back to whatever was cached, then to the shipped mapping.
+    try {
+      const cached = (await chrome.storage.local.get("sharedVenueCategories"))
+        .sharedVenueCategories;
+      if (cached && cached.data) return cached.data;
+    } catch (inner) { /* nothing cached */ }
+    console.log("[background] shared categories unavailable:", e && e.message);
+    return null;
+  }
+}
 
 const SUPABASE_URL = "https://yaydpahqlqwesqdddgfi.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlheWRwYWhxbHF3ZXNxZGRkZ2ZpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU5MDg1NDEsImV4cCI6MjA5MTQ4NDU0MX0.QQJuKz9Fnb_schlS6FEioMtyRvrJVBwAL71dzitZU-g";
@@ -352,7 +405,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 async function fetchScanConfig() {
   try {
     const resp = await fetch(
-      "https://raw.githubusercontent.com/david-dirring/fifa-ticket-scout/main/scan_config.json"
+      `${CONFIG_REPO}/scan_config.json`
     );
     if (!resp.ok) return;
     const config = await resp.json();
