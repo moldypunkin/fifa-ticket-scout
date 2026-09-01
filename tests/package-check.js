@@ -74,8 +74,14 @@ for (const s of ["resale","lms","ticketmaster","seatgeek","stubhub","evenue","ti
 }
 
 out("\n--- nothing left in diagnostic mode ---");
-check("discovery probe disarmed", /const DISCOVERY_SITE = null;/.test(inj));
-check("no site forced into discovery", !/DISCOVERY_SITE = is[A-Z]/.test(inj));
+// A shipped build must not carry an armed discovery probe. Name which site is
+// armed rather than just failing, so the message says what to do about it.
+const armed = (inj.match(/const DISCOVERY_SITE = (.*);/) || [])[1] || "";
+const isArmed = armed.trim() !== "null";
+const armedFor = (armed.match(/"([A-Z]+)"/) || [])[1] || "unknown";
+check(isArmed
+  ? `discovery probe is ARMED for "${armedFor}" — diagnostic build, disarm before release`
+  : "discovery probe disarmed", !isArmed, armed.trim());
 
 // The service worker and the popup load helper scripts outside
 // manifest.content_scripts (importScripts, and <script src> in popup.html).

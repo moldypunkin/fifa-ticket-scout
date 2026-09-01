@@ -24,11 +24,35 @@
   // full hyphenated value.
   const TM_EVENT_ID = /\/event\/([A-Za-z0-9_-]{8,})/;
 
+  // Account Manager (am.ticketmaster.com) is a white-label season-ticket and
+  // resale portal with its own url shape and no /event/ segment at all:
+  //   https://am.ticketmaster.com/mizzou/buy/ism/MjZQGjAxQVA=
+  // The trailing token is base64 (it decodes to 8 opaque bytes, not a readable
+  // id), so it is passed through verbatim rather than decoded.
+  //
+  // Anchored on /buy/<word>/ and gated to the am. host, so a normal
+  // ticketmaster.com page cannot fall into it.
+  const AM_EVENT_ID = /\/buy\/[a-z]+\/([A-Za-z0-9+=_%-]{6,})/i;
+
+  function isAccountManager() {
+    return /(^|\.)am\.ticketmaster\.com$/i.test(window.location.hostname);
+  }
+
   function getTicketmasterEventId() {
     try {
       // 1. The usual shape: /event/0F006482E69174BF
       const urlMatch = window.location.pathname.match(TM_EVENT_ID);
       if (urlMatch && urlMatch[1]) return urlMatch[1];
+
+      // 1b. Account Manager, which has no /event/ segment.
+      if (isAccountManager()) {
+        // The url token is opaque and ISMDS 404s on it. injected.js watches
+        // for /api/public/v2/events/<n>, whose hostEventId IS a Ticketmaster
+        // id, and parks it here. Prefer it when present.
+        if (window.__amHostEventId) return window.__amHostEventId;
+        const am = window.location.pathname.match(AM_EVENT_ID);
+        if (am && am[1]) return decodeURIComponent(am[1]);
+      }
 
       // 2. Query string. Some flows (resale, VVS, affiliate links) land on a
       //    path with no /event/ segment and carry the id as a parameter.
@@ -210,6 +234,7 @@
   // Intercept Ticketmaster API responses
   window.__ticketmasterAdapter = {
     isTicketmasterSite,
+    isAccountManager,
     getEventId: getTicketmasterEventId,
     getEventInfo: getTicketmasterEventInfo,
     getToken: getTicketmasterToken,

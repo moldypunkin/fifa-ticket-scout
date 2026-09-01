@@ -18,8 +18,8 @@ check("adapter exports getEventInfo", /getEventInfo: getTicketmasterEventInfo/.t
 check("injected calls getEventInfo", /__ticketmasterAdapter\.getEventInfo\(\)/.test(injected));
 check("injected posts eventInfo", /eventInfo,/.test(injected));
 check("content forwards eventInfo", /eventInfo: event\.data\.eventInfo/.test(content));
-check("background receives it from message", /processApiResponse\(message\.url, message\.body, tabId, message\.eventInfo\)/.test(bg));
-check("processApiResponse takes the param", /async function processApiResponse\(url, body, tabId, eventInfo\)/.test(bg));
+check("background receives it from message", /processApiResponse\(message\.url, message\.body, tabId, message\.eventInfo/.test(bg));
+check("processApiResponse takes the param", /async function processApiResponse\(url, body, tabId, eventInfo/.test(bg));
 check("passed to saveTicketmasterSeats", /saveTicketmasterSeats\(eventId, [\s\S]{0,60}tabId, site, eventInfo\)/.test(bg));
 check("saveTicketmasterSeats takes it", /async function saveTicketmasterSeats\(eventId, facetsData, tabId, site, eventInfo\)/.test(bg));
 check("writes games[gameKey].match", /games\[gameKey\]\.match = \{/.test(bg));

@@ -547,7 +547,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const tabId = sender?.tab?.id;
 
   if (message.type === "API_RESPONSE") {
-    processApiResponse(message.url, message.body, tabId, message.eventInfo);
+    processApiResponse(message.url, message.body, tabId, message.eventInfo, message.amEventId);
   }
   if (message.type === "CLEAR_DATA") {
     chrome.storage.session.remove("scannedGames");
@@ -676,7 +676,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-async function processApiResponse(url, body, tabId, eventInfo) {
+async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
   if (!body) return;
 
   const site = siteFromUrl(url);
@@ -778,6 +778,29 @@ async function processApiResponse(url, body, tabId, eventInfo) {
       })();
       bgLog(`[background] AXS: ${path} (${size}) -> ${shape}`);
     }
+  }
+
+  // Account Manager (ISM v810). The two payloads arrive as separate
+  // responses in either order, so hold whichever comes first and parse once
+  // both are in. Keyed by event so two open tabs cannot cross-contaminate.
+  if (amEventId && /\/v810\/(venueAvailability|priceData)\//.test(url)) {
+    const pending = amPending[amEventId] || (amPending[amEventId] = {});
+    if (url.includes("/venueAvailability/")) pending.availability = body;
+    if (url.includes("/priceData/")) pending.priceData = body;
+    pending.eventInfo = eventInfo || pending.eventInfo;
+
+    if (pending.availability && pending.priceData) {
+      await enforceGameLimit(`ticketmaster:${amEventId}`);
+      await saveAmSeats(amEventId, pending.availability, pending.priceData,
+        tabId, "ticketmaster", pending.eventInfo);
+      delete amPending[amEventId];
+    } else {
+      const waiting = pending.availability ? "priceData" : "venueAvailability";
+      bgLog(`[background] AM: have ${pending.availability ? "availability" : "prices"} ` +
+        `for ${amEventId}, waiting on ${waiting}`);
+    }
+    notifyDataUpdated();
+    return;
   }
 
   // Evenue seat availability — captured passively. Matched on the payload
@@ -2114,6 +2137,166 @@ async function saveTickPickSeats(eventId, body, tabId, site, eventInfo) {
   if (tabId) tabGameMap[tabId] = gameKey;
   await chrome.storage.local.set({ games });
 }
+
+// ─── Ticketmaster Account Manager (ISM v810) ──────────────────────────────
+// am.ticketmaster.com is a Ticketmaster host running a different application.
+// ISMDS is cross-origin from it and blocked, so the scan cannot reach the
+// facets endpoint at any id — confirmed against event 060064A9DD13378D, which
+// IS a valid ISMDS id and still failed at the network layer. The page's own
+// ISM v810 calls carry the same information, so they are captured passively.
+//
+// Two payloads, arriving independently:
+//
+//   /v810/venueAvailability/buy   what is for sale, per section
+//   /v810/priceData/buy           what each price code costs
+//
+// Both are tilde-delimited rows with a `header` naming every column, so the
+// columns are read BY NAME rather than by position.
+//
+// Confirmed against Mizzou event 7524 (host id 060064A9DD13378D):
+//   "101~10~G,F~0~~0~0~~~~~~~~~~6,4~~~GEYDC"  section 101, 10 seats, codes G,F
+//   "_AS~AS~92~Reserved - Single Game~..."    code A, all-in amount 92
+//
+// This is SECTION level. ISM exposes counts per section, not individual seats,
+// so there is no row/seat here and no seats-together clustering.
+function amParseDelimited(block) {
+  const rows = block && block.data;
+  const header = block && block.header;
+  if (!Array.isArray(rows) || typeof header !== "string") return [];
+  const cols = header.split("~");
+  const out = [];
+  for (const line of rows) {
+    if (typeof line !== "string") continue;
+    const parts = line.split("~");
+    const rec = {};
+    cols.forEach((c, i) => { rec[c] = parts[i]; });
+    out.push(rec);
+  }
+  return out;
+}
+
+// price code -> all-in amount in dollars.
+//
+// `amount` is the all-in figure: for eight of the nine codes on the captured
+// event it equals ticketPrice + the $8 component, so it is what a buyer pays.
+// The bracketed component list is NOT split on "~" reliably (it contains
+// commas, not tildes), so `amount` is read by name and the components ignored.
+function amPriceMap(priceData) {
+  const map = {};
+  const codes = priceData && priceData.data && priceData.data.priceCode
+    && priceData.data.priceCode.data;
+  if (!codes || typeof codes !== "object") return map;
+
+  const header = priceData.data.priceCode.header;
+  for (const code of Object.keys(codes)) {
+    const entry = codes[code];
+    const rows = amParseDelimited({ data: entry && entry.data, header });
+    for (const r of rows) {
+      const amount = parseFloat(r.amount);
+      if (isFinite(amount) && amount > 0) {
+        map[code.toUpperCase()] = amount;
+        break;
+      }
+    }
+  }
+  return map;
+}
+
+// Cheapest code wins. A section can list several ("G,F") without saying how
+// many seats sit at each, so quoting the lowest matches what the site
+// advertises as its "from" price. Every code and price is kept in attributes
+// so nothing is hidden by the choice.
+function amSectionPrice(priceCodes, priceMap) {
+  const codes = String(priceCodes || "").split(",")
+    .map((c) => c.trim().toUpperCase()).filter(Boolean);
+  const prices = codes.map((c) => priceMap[c]).filter((n) => typeof n === "number" && n > 0);
+  if (!prices.length) return { price: null, codes, prices };
+  return { price: Math.min.apply(null, prices), codes, prices };
+}
+
+async function saveAmSeats(eventId, availability, priceData, tabId, site, eventInfo) {
+  const sections = amParseDelimited(
+    availability && availability.data && availability.data.section);
+  if (!sections.length) {
+    bgLog("[background] AM: no section rows in venueAvailability — not parsing");
+    return;
+  }
+  const priceMap = amPriceMap(priceData);
+
+  const gameKey = `${site}:${eventId}`;
+  const data = await getStorage();
+  const games = data.games || {};
+  if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  if (eventInfo && eventInfo.name) {
+    games[gameKey].match = {
+      name: eventInfo.name,
+      date: eventInfo.date || null,
+      venue: eventInfo.venue || null,
+      currency: "USD",
+      performanceId: eventId,
+    };
+  }
+
+  const venueName = games[gameKey].match && games[gameKey].match.venue;
+  const seats = {};
+  let noPrice = 0;
+  let empty = 0;
+
+  try {
+    for (const sec of sections) {
+      const block = String(sec.sectionName || "");
+      const available = Number(sec.totalAvailableSeat) || 0;
+      if (!block || available <= 0) { empty++; continue; }
+
+      const { price: dollars, codes, prices } = amSectionPrice(sec.priceCode, priceMap);
+      if (dollars == null) { noPrice++; continue; }
+      const price = Math.round(dollars * 1000);
+
+      const attributes = [];
+      if (codes.length) attributes.push(`price codes ${codes.join(",")}`);
+      if (prices.length > 1) attributes.push(`prices ${prices.join(", ")}`);
+      if (Number(sec.resaleSeatsCount) > 0) attributes.push(`${sec.resaleSeatsCount} resale`);
+
+      // One row per available seat, so counts and price stats are right even
+      // though ISM never says WHICH seats they are.
+      for (let i = 0; i < available; i++) {
+        seats[`${block}-${i}`] = {
+          block,
+          row: "",
+          seat: "",
+          area: sec.adaCodes ? `ADA ${sec.adaCodes}` : "",
+          category: "primary",
+          tier: VenueTiers.tierFor(venueName, block, ""),
+          price,
+          exclusive: true,
+          site: "ticketmaster",
+          accessible: String(sec.isWheelChairEnabled) === "1",
+          attributes,
+        };
+      }
+    }
+  } catch (error) {
+    bgLog("[background] Error parsing AM sections:", error.message);
+  }
+
+  const total = Object.keys(seats).length;
+  bgLog(`[background] AM: ${total} seats across ${sections.length} sections ` +
+    `(${Object.keys(priceMap).length} price codes)` +
+    (noPrice ? `, ${noPrice} sections had no resolvable price` : "") +
+    (empty ? `, ${empty} sections had none available` : ""));
+
+  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].site = site;
+  games[gameKey].lastScanned = Date.now();
+
+  if (tabId) tabGameMap[tabId] = gameKey;
+  await chrome.storage.local.set({ games });
+}
+
+// Half-arrived Account Manager payloads, keyed by event id. In memory only:
+// a scan that never completes should not persist.
+const amPending = {};
 
 function extractParam(url, param) {
   try {

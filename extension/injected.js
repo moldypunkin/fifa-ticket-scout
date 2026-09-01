@@ -18,6 +18,16 @@
   const isStubHub = window.location.hostname.includes('stubhub.com');
   const isEvenue = window.location.hostname.includes('evenue.net');
   const isTickPick = window.location.hostname.includes('tickpick.com');
+  // Account Manager is a Ticketmaster host running a different application:
+  // no /event/ url, and ISMDS is cross-origin from it, so its inventory has to
+  // be captured from the page's own ISM calls.
+  //
+  // Declared HERE, with the other site flags, because MATCH_PATTERNS and
+  // shouldCapture both read it near the top of this file. It previously sat
+  // beside DISCOVERY_SITE further down, and `const` hoisting put it in a
+  // temporal dead zone — the IIFE threw on load for every site, not just AM.
+  const isTicketmasterAM = isTicketmaster &&
+    /(^|\.)am\.ticketmaster\.com$/i.test(window.location.hostname);
   const isAxs = window.location.hostname.includes('axs.com');
 
   if (isTicketmaster) {
@@ -49,7 +59,13 @@
   // StubHub returns its listings on the event page's OWN path with a query
   // string, so the pattern is the path segment; background.js confirms the
   // body actually carries `items` before parsing.
-  const MATCH_PATTERNS = isTicketmaster
+  // Account Manager is the exception among Ticketmaster hosts: ISMDS is
+  // cross-origin from am.ticketmaster.com and blocked, so the scan cannot
+  // reach it. The page's own ISM v810 calls carry the same information, so
+  // capture those passively the way every other resale site works.
+  const MATCH_PATTERNS = isTicketmasterAM
+    ? ["/v810/venueAvailability/", "/v810/priceData/"]
+    : isTicketmaster
     ? []
     : isSeatGeek
       ? ["/api/event_listings_v2"]
@@ -89,8 +105,9 @@
   const SCAN_COOLDOWN_MS = 60000;
 
   function shouldCapture(url) {
-    // For Ticketmaster, never auto-capture page requests
-    if (isTicketmaster) return false;
+    // For Ticketmaster, never auto-capture page requests — except Account
+    // Manager, whose inventory only arrives that way.
+    if (isTicketmaster && !isTicketmasterAM) return false;
     // FIFA, SeatGeek, StubHub, Evenue and TickPick match on their own patterns.
     return MATCH_PATTERNS.some((p) => url.includes(p));
   }
@@ -263,8 +280,16 @@
   //
   // Set to a short site tag ("EV", "SH", "SG", …) to hunt a new site's
   // inventory endpoint; null once that site is parsed.
+  // Account Manager is parsed now (venueAvailability + priceData, captured
+  // passively). Set this to a short site tag again to map the next source.
   const DISCOVERY_SITE = null;
   const PROBE_MIN_CHARS = 2000;
+  // Small JSON bodies are printed in full up to this size while a site is
+  // being mapped. Above it, only the url is named.
+  const SMALL_BODY_MAX = 2500;
+  // Above the size floor but with no sampleable arrays: print the body rather
+  // than reporting nothing useful about it.
+  const RAW_BODY_MAX = 6000;
   const PROBE_SKIP = /google|doubleclick|datadog|forter|riskified|openai|reddit|yimg|adsrvr|boomtrain|iteratehq|datadome|newrelic|segment|branch\.io|qualtrics|vggcdn|cloudfront|akamai|cookielaw|onetrust|\.geojson|map-sprites|svgnew|sprite|mapbox|\.png|\.jpg|\.svg|\.woff|\.pbf|\.css|field_images|\/glyphs\//i;
   // path -> largest payload already reported for it. StubHub reuses ONE path
   // for both the full inventory and small filtered queries (the query string
@@ -275,7 +300,7 @@
   // Silence is ambiguous — it can mean "no request happened" or "the probe
   // threw and the caller's .catch swallowed it". Count every outcome and
   // report once, so a quiet run still says why.
-  const probeStats = { seen: 0, small: 0, skipped: 0, nonJson: 0, dup: 0, reported: 0, errors: 0, htmlReported: 0 };
+  const probeStats = { seen: 0, small: 0, skipped: 0, nonJson: 0, dup: 0, reported: 0, errors: 0, htmlReported: 0, smallNamed: 0, smallDumped: 0 };
   let probeSummaryTimer = null;
 
   function probeSummary() {
@@ -287,6 +312,113 @@
     if (probeStats.seen === 0) {
       console.log(`${t} no responses reached the probe at all — the page may be serving from cache; try a hard reload`);
     }
+  }
+
+  // Account Manager identifies an event by an opaque url token
+  // ("MjZGQjAxQVA="), but ISMDS needs Ticketmaster's own id. The page fetches
+  // /api/public/v2/events/<n>, whose response carries BOTH:
+  //   {"id":7524, "hostEventId":"060064A9DD13378D", ...}
+  // hostEventId is a legacy 16-char hex Ticketmaster id — the format the
+  // facets endpoint expects — so remember it and scan with that instead.
+  // The url token, read straight from the address bar.
+  //
+  // This is the PAIRING and STORAGE key for Account Manager, deliberately not
+  // hostEventId. Two reasons:
+  //   * the popup derives its lookup key from the url and cannot see
+  //     window.__amHostEventId, so seats stored under the host id would be
+  //     invisible to it; and
+  //   * the token is stable from first paint, while the host id appears only
+  //     after an XHR — so keying on it would pair the two ISM payloads under
+  //     different keys depending on which arrived first.
+  function amUrlToken() {
+    try {
+      const m = window.location.pathname.match(/\/buy\/[a-z]+\/([A-Za-z0-9+=_%-]{6,})/i);
+      return m ? decodeURIComponent(m[1]) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // /api/admin/v2/venues is an object keyed by venue id. Field names are not
+  // confirmed, so probe the plausible ones and leave venue null if none match
+  // — tierFor() then falls back to the section heuristic, exactly as now.
+  function amNoteVenues(url, text) {
+    if (!isTicketmasterAM) return;
+    if (!/\/api\/admin\/v2\/venues/.test(String(url))) return;
+    try {
+      const body = JSON.parse(text);
+      if (!body || typeof body !== "object") return;
+      const info = window.__amEventInfo || (window.__amEventInfo = {});
+      const entry = info.venueId ? body[info.venueId] : null;
+      const candidate = entry &&
+        (entry.name || entry.venueName || entry.description || entry.title);
+      if (candidate) {
+        info.venue = String(candidate).trim();
+        console.log(`[AM] venue ${info.venueId} -> "${info.venue}"`);
+      } else if (entry) {
+        console.log(`[AM] venue ${info.venueId} found but no name field; keys: ` +
+          Object.keys(entry).slice(0, 12).join(","));
+      }
+    } catch (e) { /* not the payload we are after */ }
+  }
+
+  // ismConfiguration carries `data.venueName` directly. That is a better
+  // source than the venues list: no id lookup, no guessing at field names, and
+  // it arrives on every event page. Without it tierFor() falls back to the
+  // section-text heuristic and the popup shows "no venue - heuristic".
+  function amNoteVenueName(url, text) {
+    if (!isTicketmasterAM) return;
+    if (!/\/v810\/ismConfiguration\//.test(String(url))) return;
+    try {
+      const body = JSON.parse(text);
+      const name = body && body.data && body.data.venueName;
+      if (typeof name === "string" && name.trim()) {
+        const info = window.__amEventInfo || (window.__amEventInfo = {});
+        if (!info.venue) {
+          info.venue = name.trim();
+          console.log(`[AM] venue "${info.venue}" (from ismConfiguration)`);
+        }
+      }
+    } catch (e) { /* not the payload we are after */ }
+  }
+
+  function noteAmHostEventId(url, text) {
+    if (!isTicketmasterAM || window.__amHostEventId) return;
+    if (!/\/api\/public\/v2\/events\/\d+/.test(String(url))) return;
+    try {
+      const body = JSON.parse(text);
+      const host = body && body.hostEventId;
+      if (typeof host === "string" && /^[A-Za-z0-9_-]{8,}$/.test(host)) {
+        window.__amHostEventId = host;
+        console.log(`[AM] host event id ${host} (internal id ${body.id})`);
+      }
+
+      // Account Manager publishes no JSON-LD, so the shared event-info reader
+      // finds nothing and the popup sits on "Match data loading…". This same
+      // payload carries the name and start time, so take them from here.
+      if (body && body.name) {
+        const info = window.__amEventInfo || (window.__amEventInfo = {});
+        info.name = String(body.name).trim();
+        if (!info.date && body.datetime) {
+          // Don't depend on event-info.js having loaded: it is a separate
+          // content script, and a null date here silently became "?" with no
+          // way to tell whether the value was missing, unparseable, or the
+          // helper simply absent. Same DD-MM-YYYY - HH:MM shape formatDate()
+          // expects; venue-local wall clock, never timezone-shifted.
+          const m = String(body.datetime)
+            .match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/);
+          if (m) {
+            info.date = `${m[3]}-${m[2]}-${m[1]}` + (m[4] ? ` - ${m[4]}:${m[5]}` : "");
+          } else {
+            console.log(`[AM] could not read a date from ${JSON.stringify(body.datetime)}`);
+          }
+        }
+        // The event names only a venue id; amNoteVenues resolves it.
+        if (body.venue && body.venue.id != null) info.venueId = String(body.venue.id);
+        console.log(`[AM] event info: name=${info.name} date=${info.date || "?"} ` +
+          `venueId=${info.venueId || "?"}`);
+      }
+    } catch (e) { /* not the payload we are after */ }
   }
 
   function probeResponse(url, text) {
@@ -303,7 +435,36 @@
   }
 
   function probeResponseInner(url, text) {
-    if (text.length < PROBE_MIN_CHARS) { probeStats.small++; return; }
+    if (text.length < PROBE_MIN_CHARS) {
+      probeStats.small++;
+      // Availability can be compact — a bitmask or a list of ids — so name the
+      // small JSON responses rather than only counting them. One line each, no
+      // dump, capped so a polling page cannot flood the log.
+      const h = text.slice(0, 40).trim();
+      if ((h.startsWith("{") || h.startsWith("[")) && probeStats.smallNamed < 12) {
+        const k = String(url).split("?")[0];
+        if (!probeBest.has("small:" + k)) {
+          probeBest.set("small:" + k, text.length);
+          probeStats.smallNamed++;
+          console.log(`[${DISCOVERY_SITE}-PROBE] small ${text.length}B ${toAbsoluteUrl(url).slice(0, 190)}`);
+          // Naming alone was not enough: ISM splits an event across several
+          // ~1kB calls, and venueAvailability/buy — the one that says what is
+          // actually for sale — is 1078B. At this size the whole body costs
+          // less than another reload, so print it.
+          // Skip trivially small bodies: "[]", "{}", a two-field geo blob.
+          // They burned the whole budget last run, so venueAvailability/buy
+          // and initialize/buy were named but never printed.
+          const trivial = text.trim().length < 50;
+          if (!trivial && text.length <= SMALL_BODY_MAX && probeStats.smallDumped < 8) {
+            probeStats.smallDumped++;
+            for (let i = 0; i < text.length; i += 500) {
+              console.log(`[${DISCOVERY_SITE}-PROBE]   b[${i}]: ${text.slice(i, i + 500)}`);
+            }
+          }
+        }
+      }
+      return;
+    }
     if (PROBE_SKIP.test(url)) { probeStats.skipped++; return; }
 
     const head = text.slice(0, 200).trim();
@@ -350,7 +511,18 @@
         : Object.keys(parsed).slice(0, 18).join(",");
 
     const abs = toAbsoluteUrl(url);
-    console.log(`${tag} ${(text.length / 1024).toFixed(1)}kB ${abs.split("?")[0]}`);
+    const base = abs.split("?")[0];
+    if (base.length <= 150) {
+      console.log(`${tag} ${(text.length / 1024).toFixed(1)}kB ${base}`);
+    } else {
+      // Chunked for the same reason the query string is: the console elides a
+      // long line mid-way, and on ISM urls the elided middle is the part that
+      // names the event.
+      console.log(`${tag} ${(text.length / 1024).toFixed(1)}kB (path in ${Math.ceil(base.length / 150)} parts)`);
+      for (let i = 0; i < base.length; i += 150) {
+        console.log(`${tag}   p[${i}]: ${base.slice(i, i + 150)}`);
+      }
+    }
     const query = abs.split("?")[1];
     // Chopped into chunks the console will not elide mid-line.
     if (query) {
@@ -366,7 +538,83 @@
     // (arrays of arrays), so no "price"/"section" key ever appears.
     // PROBE_SKIP, the size floor and the dedupe keep the volume sane, and
     // dumpShape caps its own output.
-    if (parsed) dumpShape(parsed, tag);
+    if (parsed) {
+      const shown = dumpShape(parsed, tag);
+      if (!shown && text.length <= RAW_BODY_MAX) {
+        // Nothing array-shaped to sample, but small enough to just read.
+        for (let i = 0; i < text.length; i += 500) {
+          console.log(`${tag}   raw[${i}]: ${text.slice(i, i + 500)}`);
+        }
+      }
+    }
+  }
+
+  // Objects keyed by id, rather than arrays of records. Report the biggest of
+  // them and one real entry, so a keyed payload is as visible as a list.
+  function dumpMaps(parsed, tag) {
+    const maps = [];
+    (function walk(node, path, depth) {
+      if (!node || typeof node !== "object" || Array.isArray(node) || depth > 5) return;
+      const keys = Object.keys(node);
+      // Values may be objects OR strings. ISM ships tilde-delimited rows as
+      // strings keyed by id, and requiring object values meant sectionData
+      // (648kB) reported "nothing to sample" three runs running.
+      const useful = keys.filter((k) => {
+        const v = node[k];
+        return (v && typeof v === "object") || (typeof v === "string" && v.length > 8);
+      });
+      if (keys.length >= 3 && useful.length >= Math.min(3, keys.length)) {
+        maps.push({ path: path || "(root)", count: keys.length, keys, node });
+      }
+      for (const k of keys.slice(0, 40)) walk(node[k], path ? `${path}.${k}` : k, depth + 1);
+    })(parsed, "", 0);
+
+    if (!maps.length) {
+      // Last resort: a long string somewhere in the payload. ISM's delimited
+      // blobs arrive this way, and reporting "nothing to sample" hid one.
+      let longest = null;
+      (function findStrings(node, path, depth) {
+        if (!node || typeof node !== "object" || depth > 5) return;
+        for (const k of Object.keys(node).slice(0, 40)) {
+          const v = node[k];
+          const p2 = path ? `${path}.${k}` : k;
+          if (typeof v === "string" && v.length > 200) {
+            if (!longest || v.length > longest.value.length) longest = { path: p2, value: v };
+          } else if (v && typeof v === "object") {
+            findStrings(v, p2, depth + 1);
+          }
+        }
+      })(parsed, "", 0);
+
+      if (longest) {
+        console.log(`${tag}   long string @ ${longest.path} (${longest.value.length} chars):`);
+        for (let i = 0; i < Math.min(longest.value.length, 1500); i += 500) {
+          console.log(`${tag}   t[${i}]: ${longest.value.slice(i, i + 500)}`);
+        }
+        return true;
+      }
+      console.log(`${tag}   (no arrays, keyed maps or long strings to sample)`);
+      return false;
+    }
+
+    maps.sort((a, b) => b.count - a.count);
+    console.log(`${tag}   --- ${maps.length} keyed map(s), largest first ---`);
+    for (const m of maps.slice(0, 4)) {
+      console.log(`${tag}   ${m.count} keys @ ${m.path} :: ${m.keys.slice(0, 12).join(",")}`);
+    }
+
+    const best = maps[0];
+    // Sample a few entries, not one: a keyed payload is often uniform, and one
+    // entry does not show whether values vary by section.
+    for (const sampleKey of best.keys.slice(0, 2)) {
+      const sample = best.node[sampleKey];
+      console.log(`${tag}   SAMPLE ${best.path}["${sampleKey}"]:`);
+      const json = typeof sample === "string" ? sample : JSON.stringify(sample);
+      for (let i = 0; i < Math.min(json.length, 1500); i += 500) {
+        console.log(`${tag}   m[${i}]: ${json.slice(i, i + 500)}`);
+      }
+    }
+    return true;
   }
 
   function dumpShape(parsed, tag) {
@@ -415,8 +663,10 @@
     // payload we actually want stays invisible.
     const picks = ranked.slice(0, 3);
     if (!picks.length) {
-      console.log(`${tag}   (no arrays with sampleable elements)`);
-      return;
+      // No arrays — but a payload can be a MAP keyed by id, which is how ISM
+      // ships sectionData (550kB) and the venues list. Reporting "no arrays"
+      // and stopping hid both.
+      return dumpMaps(parsed, tag);
     }
 
     for (const pick of picks) {
@@ -453,6 +703,7 @@
         });
       }
     }
+    return true;
   }
 
   // Pages may call fetch/XHR with a relative URL — SeatGeek requests
@@ -474,6 +725,11 @@
   // scan time.
   function pageEventInfo() {
     try {
+      // AM has no JSON-LD; its own API is the only source.
+      if (isTicketmasterAM && window.__amEventInfo && window.__amEventInfo.name) {
+        const i = window.__amEventInfo;
+        return { name: i.name, date: i.date || null, venue: i.venue || null };
+      }
       const adapter = isSeatGeek ? window.__seatgeekAdapter
         : isStubHub ? window.__stubhubAdapter
         : isEvenue ? window.__evenueAdapter
@@ -483,6 +739,51 @@
       return adapter ? adapter.getEventInfo() : undefined;
     } catch (e) {
       return undefined;
+    }
+  }
+
+  // ─── WebSocket (discovery only) ──────────────────────────────────────────
+  // The last unwatched channel. initialize/buy hands the page an AppSync
+  // subscriptionUrl, and everything fetched over HTTP describes the venue —
+  // seat GEOMETRY, seat ADJACENCY, per-section counts — but never says which
+  // individual seats are for sale. A live seat-status feed would explain that,
+  // and it would be invisible to a fetch/XHR hook.
+  //
+  // Messages are usually small, so there is no size floor here; the cap is on
+  // count instead, since a status feed can be chatty.
+  if (DISCOVERY_SITE && typeof WebSocket !== "undefined") {
+    const NativeWebSocket = WebSocket;
+    let wsLogged = 0;
+    const WS_MAX = 25;
+
+    function patchedWebSocket(url, protocols) {
+      const ws = protocols === undefined
+        ? new NativeWebSocket(url)
+        : new NativeWebSocket(url, protocols);
+      console.log(`[${DISCOVERY_SITE}-PROBE] websocket open ${String(url).slice(0, 140)}`);
+      ws.addEventListener("message", (e) => {
+        if (wsLogged >= WS_MAX) return;
+        const data = typeof e.data === "string" ? e.data : "(binary)";
+        // Keepalives dominate otherwise.
+        if (data.length < 12 || /"type"\s*:\s*"ka"/.test(data)) return;
+        wsLogged++;
+        for (let i = 0; i < Math.min(data.length, 1200); i += 400) {
+          console.log(`[${DISCOVERY_SITE}-PROBE]   ws[${i}]: ${data.slice(i, i + 400)}`);
+        }
+        if (wsLogged === WS_MAX) {
+          console.log(`[${DISCOVERY_SITE}-PROBE] websocket: ${WS_MAX} messages logged, stopping`);
+        }
+      });
+      return ws;
+    }
+    patchedWebSocket.prototype = NativeWebSocket.prototype;
+    for (const k of ["CONNECTING", "OPEN", "CLOSING", "CLOSED"]) {
+      patchedWebSocket[k] = NativeWebSocket[k];
+    }
+    try {
+      window.WebSocket = patchedWebSocket;
+    } catch (e) {
+      console.log(`[${DISCOVERY_SITE}-PROBE] could not patch WebSocket: ${e && e.message}`);
     }
   }
 
@@ -584,7 +885,10 @@
 
   function postInventory(url, body) {
     window.postMessage(
-      { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(url), body, eventInfo: pageEventInfo() },
+      { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(url), body,
+            eventInfo: pageEventInfo(),
+            // ISM urls name no event; pair the payload with the id we resolved.
+            amEventId: isTicketmasterAM ? amUrlToken() : undefined },
       "*"
     );
   }
@@ -1041,6 +1345,14 @@
 
     const response = await originalFetch.apply(this, args);
 
+    if (isTicketmasterAM) {
+      response.clone().text().then((t) => {
+        noteAmHostEventId(url, t);
+        amNoteVenues(url, t);
+        amNoteVenueName(url, t);
+      }).catch(() => {});
+    }
+
     if (DISCOVERY_SITE) {
       // Read off a clone so the page's own consumer is untouched.
       response.clone().text().then((t) => probeResponse(url, t)).catch((e) => {
@@ -1059,7 +1371,10 @@
         const body = await clone.json();
         noteCapture(url, body, true);
         window.postMessage(
-          { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(url), body, eventInfo: pageEventInfo() },
+          { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(url), body,
+            eventInfo: pageEventInfo(),
+            // ISM urls name no event; pair the payload with the id we resolved.
+            amEventId: isTicketmasterAM ? amUrlToken() : undefined },
           "*"
         );
         maybeFollowUp(url, body);
@@ -1093,6 +1408,20 @@
   };
 
   XMLHttpRequest.prototype.send = function (...args) {
+    // The AM event payload arrives by XHR, not fetch. Hooking only fetch meant
+    // hostEventId was never captured and the scan kept using the url token.
+    if (isTicketmasterAM && this._ftsUrl) {
+      this.addEventListener("load", function () {
+        let body = null;
+        try { body = this.responseText; } catch (e) { /* responseType set */ }
+        if (typeof body === "string") {
+          noteAmHostEventId(this._ftsUrl, body);
+          amNoteVenues(this._ftsUrl, body);
+          amNoteVenueName(this._ftsUrl, body);
+        }
+      });
+    }
+
     if (DISCOVERY_SITE && this._ftsUrl) {
       this.addEventListener("load", function () {
         let body = null;
@@ -1127,7 +1456,9 @@
           const body = JSON.parse(this.responseText);
           noteCapture(this._ftsUrl, body, true);
           window.postMessage(
-            { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(this._ftsUrl), body, eventInfo: pageEventInfo() },
+            { type: "FIFA_TICKET_SCOUT", url: toAbsoluteUrl(this._ftsUrl), body,
+              eventInfo: pageEventInfo(),
+              amEventId: isTicketmasterAM ? amUrlToken() : undefined },
             "*"
           );
           maybeFollowUp(this._ftsUrl, body);
@@ -1188,6 +1519,27 @@
 
       const token = window.__ticketmasterAdapter.getToken();
       const correlationId = window.__ticketmasterAdapter.generateCorrelationId();
+
+      // On Account Manager the id resolved at readiness is the opaque url
+      // token, which ISMDS does not know. The real one arrives a moment later
+      // in the page's own /api/public/v2/events/<n> response, so wait for it
+      // rather than scanning with a value we already know will fail.
+      //
+      // Re-resolved here rather than at readiness because the readiness poll
+      // fires as soon as ANY id is found — and on AM that is always the token.
+      // Account Manager inventory arrives passively from the page's own ISM
+      // calls, captured above. ISMDS is cross-origin from am.ticketmaster.com
+      // and blocked at the network layer — confirmed with a valid ISMDS id —
+      // so attempting it here only produces a "Failed to fetch" that reads
+      // like a bug. Report and stop.
+      if (isTicketmasterAM) {
+        console.log("[TM] Account Manager: inventory is captured from the page's " +
+          "own ISM calls (venueAvailability + priceData), not from an ISMDS scan. " +
+          "Nothing to fetch.");
+        progress({ completed: 1, status: "complete" });
+        tmScanInProgress = false;
+        return;
+      }
 
       progress({ completed: 0, status: "scanning", eta: 3 });
 

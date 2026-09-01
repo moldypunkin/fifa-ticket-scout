@@ -2618,6 +2618,20 @@ body {
   background: var(--fifa-purple);
 }
 
+/* A side with nothing to group by. Kept visible so the control does not move
+   around between scans; the title attribute carries the reason. */
+.group-toggle-btn.disabled,
+.group-toggle-btn:disabled {
+  color: var(--gray-400, #9ca3af);
+  cursor: default;
+  opacity: 0.6;
+}
+
+.group-toggle-btn.disabled:hover,
+.group-toggle-btn:disabled:hover {
+  color: var(--gray-400, #9ca3af);
+}
+
 /* Bucket count for each side, so the switch shows what it would split into. */
 .group-toggle-count {
   font-size: 9.5px;

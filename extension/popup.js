@@ -140,10 +140,20 @@ async function getCurrentTabUrl() {
 // full hyphenated value.
 const TM_EVENT_ID_RE = /\/event\/([A-Za-z0-9_-]{8,})/;
 
+// Account Manager (am.ticketmaster.com) has no /event/ segment:
+//   https://am.ticketmaster.com/mizzou/buy/ism/MjZQGjAxQVA=
+// Mirrors AM_EVENT_ID in ticketmaster-adapter.js; the two must stay in step
+// or the adapter scans a page the popup does not recognise.
+const TM_AM_EVENT_ID_RE = /\/buy\/[a-z]+\/([A-Za-z0-9+=_%-]{6,})/i;
+
 function ticketmasterEventIdFromUrl(url) {
   if (!/ticketmaster\.com/.test(url)) return null;
   const path = url.match(TM_EVENT_ID_RE);
   if (path) return path[1];
+  if (/(^|\/\/|\.)am\.ticketmaster\.com/i.test(url)) {
+    const am = url.match(TM_AM_EVENT_ID_RE);
+    if (am) return decodeURIComponent(am[1]);
+  }
   for (const key of ["eventId", "event_id", "eventid", "id", "event"]) {
     const m = url.match(new RegExp("[?&]" + key + "=([A-Za-z0-9_-]{8,})(?:[&#]|$)", "i"));
     if (m) return m[1];
@@ -707,15 +717,23 @@ function renderGroupToggle(seats, venue, mode) {
   const el = document.getElementById("groupToggle");
   if (!el) return;
 
-  // Nothing to switch between when there is only one bucket either way.
   const catCount = new Set(seats.map((s) => s.category || "Unknown")).size;
   const tierCount = new Set(
     seats.map((s) => VenueTiers.tierFor(venue, s.block, s.row))
   ).size;
-  if (catCount < 2 && tierCount < 2) {
-    el.innerHTML = "";
-    return;
-  }
+
+  // The toggle ALWAYS renders. It used to hide itself when neither axis had
+  // two buckets, which read as "the toggle is broken" rather than "there is
+  // nothing to switch to" — and it came and went mid-session, because:
+  //
+  //   * every non-FIFA adapter stamps a constant `category` ("resale",
+  //     "primary"), so catCount is 1 on those sites permanently; and
+  //   * StubHub and TickPick capture inventory in filtered chunks, so early on
+  //     the seats can all sit in one tier and tierCount is 1 too.
+  //
+  // A chunk landing later widened the spread and the control reappeared. Now
+  // the side you cannot switch to is disabled and says why, so its position is
+  // stable and the reason is visible at the moment it matters.
 
   // In Tier mode, say where the tiers came from. A curated venue mapping and
   // the section-text heuristic both produce plausible-looking tiers, so without
@@ -736,14 +754,25 @@ function renderGroupToggle(seats, venue, mode) {
              `title="&quot;${escapeHtml(d.venue)}&quot; has no mapping, so the section-text heuristic is used">` +
              `${escapeHtml(d.key)} unmapped &middot; heuristic</span>`;
     }
-  } else if (catCount < 2) {
+  }
+  if (!hint && catCount < 2) {
     hint = `<span class="group-toggle-hint">this site reports one category</span>`;
   }
 
-  const btn = (value, label, count) => `
-    <button class="group-toggle-btn ${mode === value ? "active" : ""}" data-group="${value}">
+  // A side with one bucket cannot be switched to, but stays visible and
+  // explains itself on hover.
+  const btn = (value, label, count) => {
+    const disabled = count < 2 && mode !== value;
+    const why = disabled
+      ? ` title="Only one ${label.toLowerCase()} in this scan, so there is nothing to group by"`
+      : "";
+    return `
+    <button class="group-toggle-btn ${mode === value ? "active" : ""}` +
+      `${disabled ? " disabled" : ""}" data-group="${value}"` +
+      `${disabled ? " disabled" : ""}${why}>
       ${label} <span class="group-toggle-count">${count}</span>
     </button>`;
+  };
 
   el.innerHTML = `
     <span class="group-toggle-label">Group by</span>
@@ -755,7 +784,7 @@ function renderGroupToggle(seats, venue, mode) {
 
   el.querySelectorAll(".group-toggle-btn").forEach((b) => {
     b.addEventListener("click", () => {
-      if (b.dataset.group === mode) return;
+      if (b.dataset.group === mode || b.disabled) return;
       groupBy = b.dataset.group;
       // The two modes produce different bucket counts, so a held index would
       // point at the wrong tab. Fall back to All.

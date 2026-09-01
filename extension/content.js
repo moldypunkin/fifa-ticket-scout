@@ -180,6 +180,7 @@ window.addEventListener("message", (event) => {
       // Ticketmaster only; undefined on the FIFA paths, which carry match
       // info in the API response itself.
       eventInfo: event.data.eventInfo,
+      amEventId: event.data.amEventId,
     });
   }
 
