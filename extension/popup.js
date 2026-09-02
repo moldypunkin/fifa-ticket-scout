@@ -416,7 +416,7 @@ function renderDashboard(game) {
   const seats = Object.values(game.seats || {}).filter(s => s.exclusive !== false && s.price != null);
   const match = game.match;
 
-  renderMatchInfo(match);
+  renderMatchInfo(match, seats.length);
   renderStatsBar(seats);
   renderCategorySections(seats, match?.venue);
   renderBlockTable(seats);
@@ -447,14 +447,22 @@ function scanSpeedHtml() {
   </div>`;
 }
 
+// Composite render key ("<name>|<hasSeats>"), not just the name.
+// Reset to null anywhere the header must be redrawn from scratch.
 let lastMatchName = null;
 
-function renderMatchInfo(match) {
+function renderMatchInfo(match, seatCount) {
   const el = document.getElementById("matchInfo");
 
   // Skip re-render if match info hasn't changed (avoids pill/speed flicker)
-  if (el.children.length > 0 && (match?.name ?? null) === lastMatchName) return;
-  lastMatchName = match?.name ?? null;
+  // Whether seats exist is part of the key, not just the name. Keying on the
+  // name alone meant a nameless event kept the key at null when seats arrived,
+  // so the header stayed on "Match data loading..." for the rest of the
+  // session even though the scan had finished.
+  const hasSeats = (seatCount || 0) > 0;
+  const renderKey = `${match?.name ?? ""}|${hasSeats}`;
+  if (el.children.length > 0 && renderKey === lastMatchName) return;
+  lastMatchName = renderKey;
 
   if (match?.name) {
     // FIFA packs "… / matchNum / teams / venue" into one string; Ticketmaster
@@ -478,6 +486,20 @@ function renderMatchInfo(match) {
         ${(matchNum || venue) && date ? `<span class="sep">&middot;</span>` : ""}
         ${date ? `<span>${escapeHtml(date)}</span>` : ""}
       </div>
+    `;
+  } else if (hasSeats) {
+    // Seats are in, so nothing further is coming: this site published no event
+    // name we could read. Saying "loading" here waits forever, and the FIFA
+    // advice to browse the seat map does not apply on the resale sites.
+    const label = SITE_LABELS[currentSite] || "This site";
+    const siteBadge = `<span class="site-badge site-${currentSite}">${label}</span>`;
+    const venue = match?.venue || "";
+    el.innerHTML = `
+      <div class="match-top-row">
+        <div class="match-teams">${venue ? escapeHtml(venue) : "Seats captured"} ${siteBadge}</div>
+        ${scanSpeedHtml()}
+      </div>
+      <div class="match-meta">${label} did not publish an event name for this page</div>
     `;
   } else {
     el.innerHTML = `
