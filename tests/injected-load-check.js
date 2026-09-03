@@ -62,21 +62,32 @@ let fail = 0;
 const out = console.log;
 const check = (l, c, d) => { if (!c) fail++; out(`${c ? "ok  " : "FAIL"} ${l}${d ? " — " + d : ""}`); };
 
+// The third field says whether injected.js is supposed to RECOGNISE the site.
+// This matters more than it looks: the site if/else chain ends in an `else`
+// that logs "Unknown ticketing site" and then RETURNS, so an unrecognised site
+// never gets the fetch/XHR hooks installed. Vivid Seats shipped in exactly
+// that state — the flag, the capture guard and DISCOVERY_SITE were all wired,
+// but the branch itself was missing, so the IIFE bailed before hooking
+// anything and the discovery probe could never fire.
 const SITES = [
-  ["FIFA resale",   "https://fwc26-resale-usd.tickets.fifa.com/secure/selection/event/seat/performance/123"],
-  ["Ticketmaster",  "https://www.ticketmaster.com/event/Z7r9jZ1A7qIaF"],
-  ["TM Account Mgr","https://am.ticketmaster.com/mizzou/buy/ism/MjZGQjAxQVA="],
-  ["SeatGeek",      "https://seatgeek.com/chiefs-tickets/nfl/2026-09-14/18014270"],
-  ["StubHub",       "https://www.stubhub.com/chiefs-tickets/event/158234567/"],
-  ["Evenue",        "https://kuathletics.evenue.net/event/F26/02"],
-  ["TickPick",      "https://www.tickpick.com/buy-chiefs-tickets/6789012/"],
-  ["AXS",           "https://www.axs.com/events/123456/chiefs-tickets"],
-  ["unrelated site","https://example.com/"],
+  ["FIFA resale",   "https://fwc26-resale-usd.tickets.fifa.com/secure/selection/event/seat/performance/123", true],
+  ["Ticketmaster",  "https://www.ticketmaster.com/event/Z7r9jZ1A7qIaF", true],
+  ["TM Account Mgr","https://am.ticketmaster.com/mizzou/buy/ism/MjZGQjAxQVA=", true],
+  ["SeatGeek",      "https://seatgeek.com/chiefs-tickets/nfl/2026-09-14/18014270", true],
+  ["StubHub",       "https://www.stubhub.com/chiefs-tickets/event/158234567/", true],
+  ["Evenue",        "https://kuathletics.evenue.net/event/F26/02", true],
+  ["TickPick",      "https://www.tickpick.com/buy-chiefs-tickets/6789012/", true],
+  ["AXS",           "https://www.axs.com/events/123456/chiefs-tickets", true],
+  ["Vivid Seats",   "https://www.vividseats.com/kacey-musgraves-tickets-baltimore-cfg-bank-arena-9-5-2026--concerts-country-and-folk/production/6965630", true],
+  ["Gametime",      "https://gametime.co/nfl-football/chiefs-at-broncos-tickets/9-14-2026-denver-empower-field/events/6512ab34cd56ef7890123456", true],
+  ["unrelated site","https://example.com/", false],
 ];
 
 out("--- injected.js must load without throwing, on every site ---");
-for (const [label, href] of SITES) {
+for (const [label, href, supported] of SITES) {
   const { ctx, logs } = makeContext(href);
+  const originalFetch = ctx.window.fetch;
+  const originalOpen = ctx.window.XMLHttpRequest.prototype.open;
   let err = null;
   try {
     vm.runInContext(source, ctx, { filename: "injected.js" });
@@ -84,9 +95,23 @@ for (const [label, href] of SITES) {
     err = e && e.message;
   }
   check(`${label} loads`, !err, err);
-  if (!err) {
-    check(`${label} announced itself`, logs.some((l) => /FIFA Ticket Scout/.test(l)),
-      (logs[0] || "(no log)").slice(0, 70));
+  if (err) continue;
+
+  check(`${label} announced itself`, logs.some((l) => /FIFA Ticket Scout/.test(l)),
+    (logs[0] || "(no log)").slice(0, 70));
+
+  // "Unknown ticketing site" ALSO contains "FIFA Ticket Scout", so the
+  // announce check above passes even when the script bails. Assert the
+  // recognition and the hooks separately.
+  const bailed = logs.some((l) => /Unknown ticketing site/.test(l));
+  if (supported) {
+    check(`${label} is recognised`, !bailed, bailed ? "fell through to the Unknown branch" : "");
+    const hooked = ctx.window.fetch !== originalFetch &&
+      ctx.window.XMLHttpRequest.prototype.open !== originalOpen;
+    check(`${label} installed the hooks`, hooked,
+      hooked ? "" : "the site branch is missing, so the IIFE returned before hooking");
+  } else {
+    check(`${label} is ignored`, bailed, bailed ? "" : "should have hit the Unknown branch");
   }
 }
 

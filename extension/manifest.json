@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FIFA Ticket Scout",
-  "version": "2.6.5",
+  "version": "2.7.0",
   "description": "Real-time price tracking for FIFA World Cup 2026 resale tickets. See every seat, every price, at a glance.",
   "permissions": [
     "storage",
@@ -18,6 +18,8 @@
     "*://*.evenue.net/*",
     "*://*.tickpick.com/*",
     "*://*.axs.com/*",
+    "*://*.vividseats.com/*",
+    "*://*.gametime.co/*",
     "https://api.gumroad.com/*",
     "https://yaydpahqlqwesqdddgfi.supabase.co/*",
     "https://raw.githubusercontent.com/*"
@@ -100,6 +102,28 @@
     },
     {
       "matches": ["*://*.axs.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["*://*.vividseats.com/*"],
+      "js": ["event-info.js", "vividseats-adapter.js", "injected.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://*.vividseats.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["*://*.gametime.co/*"],
+      "js": ["event-info.js", "gametime-adapter.js", "injected.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://*.gametime.co/*"],
       "js": ["content.js"],
       "run_at": "document_start"
     }

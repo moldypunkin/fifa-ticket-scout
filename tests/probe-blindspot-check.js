@@ -102,5 +102,34 @@ probe("https://maps.ticketmaster.com/maps/geometry/3/config/259414/placeDetail",
   pad({ pages: [{ segments: [{ id: "s_250", name: "NFST12", totalPlaces: 50 }] }] }, 30000));
 check("still dumps structure", logged.some((l) => /arrays, largest first/.test(l)));
 
+out("--- blind spot #6: a long row is not cut off mid-object ---");
+// Gametime's listing object runs past 1000 chars, and the sample cap used to
+// be a flat 1000 — so `seats` and `spot`, which is to say the section and the
+// row, were simply invisible. The five sites before it happened to fit.
+logged.length = 0;
+const fat = (id) => ({
+  id: id, price: { prefee: 36000, total: 42300 },
+  filler: "x".repeat(1200),          // pushes what follows past the old cap
+  seats: ["12", "13"], spot: { section: "128", row: "9" },
+});
+probe("https://mobile.gametime.co/v3/listings/68af55be0dcf1d7f796e5e89",
+  pad({ listings: [fat("a"), fat("b"), fat("c")] }));
+const fatFirst = logged.filter((l) => /first\[\d+\]:/.test(l));
+const fatText = fatFirst.join("");
+check("the top row survives past 1000 chars", fatFirst.length > 2, fatFirst.length + " chunk(s)");
+check("the trailing fields are visible", /"spot":\{"section":"128","row":"9"\}/.test(fatText),
+  "section/row fell off the end again");
+check("seats are visible", /"seats":\["12","13"\]/.test(fatText));
+check("chunks stay console-safe", fatFirst.every((l) => l.length < 560));
+
+out("--- but the extra budget is spent only on the top row ---");
+// Three 4kB objects per array would push the real payload out of the buffer.
+const fatLater = logged.filter((l) => /(middle|last)\[\d+\]:/.test(l));
+check("runners-up keep the short cap", fatLater.every((l) => !/"spot"/.test(l)),
+  "a non-top sample was printed in full");
+check("truncation is announced, not silent",
+  logged.some((l) => /truncated at \d+ of \d+ chars/.test(l)),
+  "a cut sample must say it was cut");
+
 out(fail ? `\n${fail} FAILURES` : "\nall passed");
 process.exit(fail ? 1 : 0);

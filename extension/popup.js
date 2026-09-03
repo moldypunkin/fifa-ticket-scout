@@ -169,6 +169,8 @@ function siteFromUrl(url) {
     if (h.includes("stubhub")) return "stubhub";
     if (h.includes("evenue")) return "evenue";
     if (h.includes("tickpick")) return "tickpick";
+    if (h.includes("vividseats")) return "vividseats";
+    if (h.includes("gametime")) return "gametime";
     if (h.includes("axs")) return "axs";
     if (h.includes("-shop-")) return "lms";
     if (h.includes("-resale-")) return "resale";
@@ -232,6 +234,26 @@ function loadData() {
     const axsEventId = axsEventMatch ? axsEventMatch[1] : null;
     const isAxsEvent = !!axsEventId;
 
+    // Vivid Seats: a numeric production id, in the path or a query param.
+    // Mirrors getVividSeatsEventId() in vividseats-adapter.js; the two must
+    // stay in step or the adapter captures a page the popup cannot show.
+    // Gametime: an opaque token after /events/. Mirrors getGametimeEventId()
+    // in gametime-adapter.js; the two must stay in step or the adapter
+    // captures a page the popup cannot show.
+    const isGametimeSite = /gametime\.co/.test(url);
+    const gtEventMatch = isGametimeSite && (url.match(/\/events?\/([A-Za-z0-9][A-Za-z0-9_-]{5,})/i)
+      || url.match(/\/([0-9a-f]{24})(?:[/?#]|$)/i)
+      || url.match(/[?&]event_?[iI]d=([A-Za-z0-9_-]{6,})/));
+    const gtEventId = gtEventMatch ? gtEventMatch[1] : null;
+    const isGametimeEvent = !!gtEventId;
+
+    const isVividSeatsSite = /vividseats\.com/.test(url);
+    const vsEventMatch = isVividSeatsSite && (url.match(/\/production[s]?\/(\d+)/i)
+      || url.match(/[?&]productionId=(\d+)/i)
+      || url.match(/\/(\d{5,})(?:[/?#]|$)/));
+    const vsEventId = vsEventMatch ? vsEventMatch[1] : null;
+    const isVividSeatsEvent = !!vsEventId;
+
     // One object rather than a positional argument per site: the list only
     // grows, and eight booleans in a row is a silent mis-wire waiting to happen.
     const detected = {
@@ -245,7 +267,13 @@ function loadData() {
         : isEvenueEvent ? "evenue"
         : isTickPickEvent ? "tickpick"
         : isAxsEvent ? "axs"
+        : isVividSeatsEvent ? "vividseats"
+        : isGametimeEvent ? "gametime"
         : null,
+      // No site is in bring-up right now. A site belongs here rather than in
+      // `passive` while it is recognised but has no parser, so the empty state
+      // does not promise listings that nothing is capturing.
+      unsupported: null,
     };
 
     chrome.storage.local.get(null, (data) => {
@@ -290,6 +318,12 @@ function loadData() {
       } else if (axsEventId) {
         const axsKey = `axs:${axsEventId}`;
         if (games[axsKey]) activeKey = axsKey;
+      } else if (vsEventId) {
+        const vsKey = `vividseats:${vsEventId}`;
+        if (games[vsKey]) activeKey = vsKey;
+      } else if (gtEventId) {
+        const gtKey = `gametime:${gtEventId}`;
+        if (games[gtKey]) activeKey = gtKey;
       } else if (tabPerfId) {
         const preferred = `${tabSite}:${tabPerfId}`;
         const other = `${tabSite === "lms" ? "resale" : "lms"}:${tabPerfId}`;
@@ -338,7 +372,8 @@ function showEmpty(detected) {
 
   // No game is loaded here, so brand off the tab we're sitting on rather than
   // `currentSite` — that still holds whichever site was last rendered.
-  setBrand(isTicketmasterEvent ? "ticketmaster" : (passive || "resale"));
+  setBrand(isTicketmasterEvent ? "ticketmaster"
+    : (passive || detected.unsupported || "resale"));
 
   const title = document.getElementById("emptyTitle");
   const hint = document.getElementById("emptyHint");
@@ -364,6 +399,16 @@ function showEmpty(detected) {
     title.textContent = "Waiting for listings…";
     hint.textContent = `Reload this ${PASSIVE_SITE_LABELS[passive] || passive} event page ` +
       `and the ${passive === "evenue" ? "seats" : "tickets"} will be captured automatically.`;
+    action.style.display = "none";
+    const lmsBtn = document.getElementById("emptyActionLms");
+    if (lmsBtn) lmsBtn.style.display = "none";
+    scanningHelp.style.display = "none";
+  } else if (detected.unsupported) {
+    // Reached only while a site is in bring-up: recognised, endpoint not yet
+    // known. `unsupported` is null today, so nothing hits this branch.
+    title.textContent = `${SITE_LABELS[detected.unsupported] || detected.unsupported} not supported yet`;
+    hint.textContent = "Endpoint discovery is running \u2014 reload this page, " +
+      "then send the [PROBE] lines from Download logs.";
     action.style.display = "none";
     const lmsBtn = document.getElementById("emptyActionLms");
     if (lmsBtn) lmsBtn.style.display = "none";
@@ -531,7 +576,7 @@ let currentSite = "resale";
 // again changes this one line.
 const CONFIG_REPO = "https://raw.githubusercontent.com/moldypunkin/fifa-ticket-scout/main";
 
-const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", tickpick: "TickPick", axs: "AXS", resale: "Resale" };
+const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", tickpick: "TickPick", axs: "AXS", vividseats: "Vivid Seats", gametime: "Gametime", resale: "Resale" };
 
 // The header follows the active site. `lms` and `resale` are both FIFA
 // properties, so they keep the original name.
@@ -548,6 +593,8 @@ const SITE_FILE_TAGS = {
   evenue: "evenue",
   tickpick: "tickpick",
   axs: "axs",
+  vividseats: "vividseats",
+  gametime: "gametime",
 };
 
 function siteFileTag(site) {
@@ -572,6 +619,8 @@ const PASSIVE_SITE_LABELS = {
   evenue: "Evenue",
   tickpick: "TickPick",
   axs: "AXS",
+  vividseats: "Vivid Seats",
+  gametime: "Gametime",
 };
 
 const SITE_BRANDS = {
@@ -583,6 +632,8 @@ const SITE_BRANDS = {
   evenue: "Evenue Scout",
   tickpick: "TickPick Scout",
   axs: "AXS Scout",
+  vividseats: "Vivid Seats Scout",
+  gametime: "Gametime Scout",
 };
 
 function setBrand(site) {
@@ -912,18 +963,25 @@ function renderCategorySections(seats, venue) {
   const filteredClusters = allOn
     ? allClusters
     : allClusters.filter((c) => {
-        if (c.count >= 6) return selectedTogether.has(6);
-        return selectedTogether.has(c.count);
+        // `together` is how many are known to adjoin, which for an unnumbered
+        // group is 1 however many seats it holds. Filtering on `count` would
+        // offer a group of seven as "7 together" when nothing establishes that.
+        const n = c.together != null ? c.together : c.count;
+        if (n >= 6) return selectedTogether.has(6);
+        return selectedTogether.has(n);
       });
 
   // When filtering by together count, only use seats from qualifying clusters
   let displaySeats;
   if (!allOn) {
-    const qualifyingKeys = new Set();
+    // Same reason as the clustering above: a composite key collapsed every
+    // unnumbered seat in a block and row into one, so filtering by "together"
+    // count dropped all but the first.
+    const qualifyingSeats = new Set();
     for (const c of filteredClusters) {
-      for (const s of c.seats) qualifyingKeys.add(seatKey(s));
+      for (const s of c.seats) qualifyingSeats.add(s);
     }
-    displaySeats = activeSeats.filter((s) => qualifyingKeys.has(seatKey(s)));
+    displaySeats = activeSeats.filter((s) => qualifyingSeats.has(s));
   } else {
     displaySeats = activeSeats;
   }
@@ -1145,7 +1203,20 @@ function buildDistribution(prices, color) {
   `;
 }
 
-function seatKey(s) { return s.seat + "_" + s.block + "_" + s.row; }
+// Seats are tracked by object identity, not by a composite key.
+//
+// This used to be seatKey(s) = seat + "_" + block + "_" + row, and every seat
+// WITHOUT a number in the same block and row therefore shared one key. The
+// `used` set below then treated the second and subsequent ones as already
+// consumed and skipped them, so they never reached the dashboard at all.
+//
+// That is most of the inventory on several sources: Gametime returns "*" for
+// seats it does not disclose, and TickPick, StubHub and Vivid Seats publish no
+// seat numbers at all, storing "". A Gametime listing of four unnumbered seats
+// in 318 row 8 displayed as one.
+//
+// Identity is what "have I already used this seat" actually means, and the
+// clusters are built from the very objects being filtered, so it is exact.
 
 function buildAllClusters(seats) {
   const sorted = seats.slice().sort((a, b) =>
@@ -1165,11 +1236,46 @@ function buildAllClusters(seats) {
     groupMap.get(k).push(s);
   }
 
+  // A seat number we can actually reason about. Gametime returns "*" for seats
+  // it does not disclose, and TickPick, StubHub and Vivid Seats publish none at
+  // all — so for much of the inventory this is null, and adjacency is unknown.
+  const numberOf = (s) => {
+    const raw = (s.seat || "").trim();
+    if (!raw || raw === "*") return null;
+    const n = parseInt(raw, 10);
+    return isFinite(n) ? n : null;
+  };
+
   for (const seat of sorted) {
-    if (used.has(seatKey(seat))) continue;
+    if (used.has(seat)) continue;
 
     const k = seat.block + "_" + seat.row + "_" + seat.price;
-    const neighbors = groupMap.get(k).filter((s) => !used.has(seatKey(s)));
+    const neighbors = groupMap.get(k).filter((s) => !used.has(s));
+
+    // Unnumbered seats in the same block, row and price are indistinguishable
+    // from one another, so they belong on one line with a count rather than as
+    // N identical rows — a Gametime event produced ten consecutive "Block 233 ·
+    // Row 13 · Seat *" entries otherwise.
+    //
+    // `together` stays 1 regardless of how many there are. Nothing here says
+    // these seats adjoin: they may come from different listings entirely, and
+    // claiming "7 together" would send someone to a pair that does not exist.
+    if (numberOf(seat) === null) {
+      const unnumbered = neighbors.filter((s) => numberOf(s) === null);
+      for (const s of unnumbered) used.add(s);
+      clusters.push({
+        block: seat.block,
+        row: seat.row,
+        seatDisplay: "Seat *",
+        count: unnumbered.length,
+        together: 1,
+        adjacent: false,
+        price: centsToUSD(seat.price),
+        area: seat.area,
+        seats: unnumbered,
+      });
+      continue;
+    }
 
     neighbors.sort((a, b) =>
       a.seat.localeCompare(b.seat, undefined, { numeric: true })
@@ -1188,10 +1294,13 @@ function buildAllClusters(seats) {
     }
 
     for (const s of consecutive) {
-      used.add(seatKey(s));
+      used.add(s);
     }
 
-    const seatNums = consecutive.map((s) => s.seat);
+    // Most sources publish no seat numbers, so this is the common case rather
+    // than the exception: render it as "*" instead of a trailing blank.
+    // Gametime uses the same mark in its own listings.
+    const seatNums = consecutive.map((s) => (s.seat && s.seat.trim()) || "*");
     const seatDisplay =
       seatNums.length === 1
         ? `Seat ${seatNums[0]}`
@@ -1202,6 +1311,9 @@ function buildAllClusters(seats) {
       row: seat.row,
       seatDisplay,
       count: consecutive.length,
+      // A consecutive run of real seat numbers: these genuinely do adjoin.
+      together: consecutive.length,
+      adjacent: true,
       price: centsToUSD(seat.price),
       area: seat.area,
       seats: consecutive,
@@ -1230,7 +1342,9 @@ function renderClusterPage(clusters, page) {
         <div class="cluster-rank">${rank}</div>
         <div class="cluster-info">
           <div class="cluster-location">Block ${escapeHtml(c.block)} &middot; Row ${escapeHtml(c.row)} &middot; ${escapeHtml(c.seatDisplay)}</div>
-          <div class="cluster-detail">${c.count > 1 ? c.count + " together" : "single seat"}${c.area ? " &middot; " + escapeHtml(c.area.length > 30 ? c.area.substring(0, 28) + "\u2026" : c.area) : ""}</div>
+          <div class="cluster-detail">${c.adjacent === false
+            ? (c.count > 1 ? c.count + " available &middot; seats not numbered" : "single seat")
+            : (c.count > 1 ? c.count + " together" : "single seat")}${c.area ? " &middot; " + escapeHtml(c.area.length > 30 ? c.area.substring(0, 28) + "\u2026" : c.area) : ""}</div>
         </div>
         <div class="cluster-price">$${formatPrice(c.price)}${c.count > 1 ? "<span class='each'>ea</span>" : ""}</div>
       </div>`;
@@ -1538,7 +1652,7 @@ function compareVersions(a, b) {
 // tickpick stores `p`, the per-ticket price the listing quotes. TickPick
 // advertises all-in pricing so 1.0 is expected to be right, but that has not
 // been checked against a checkout page.
-const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0 };
+const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0 };
 
 // Flat per-ticket fee, added after the multiplier. Percentage fees alone could
 // not describe Evenue: its price-level table quotes a base price and the site

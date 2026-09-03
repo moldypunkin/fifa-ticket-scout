@@ -9,7 +9,7 @@
   // Three debugging rounds in this project were spent on results produced by a
   // build that had not been reloaded, which is indistinguishable from a change
   // that did not work. Compare this against what package.py prints.
-  const BUILD_STAMP = "f0704a95";
+  const BUILD_STAMP = "15fe2fd5";
   
   // Detect which ticketing site we're on
   const isTicketmaster = window.location.hostname.includes('ticketmaster.com');
@@ -29,6 +29,8 @@
   const isTicketmasterAM = isTicketmaster &&
     /(^|\.)am\.ticketmaster\.com$/i.test(window.location.hostname);
   const isAxs = window.location.hostname.includes('axs.com');
+  const isVividSeats = window.location.hostname.includes('vividseats.com');
+  const isGametime = window.location.hostname.includes('gametime.co');
 
   if (isTicketmaster) {
     console.log("[FIFA Ticket Scout] Running on Ticketmaster (will use adapter) build " + BUILD_STAMP);
@@ -44,6 +46,10 @@
     console.log("[FIFA Ticket Scout] Running on TickPick (endpoint discovery mode) build " + BUILD_STAMP);
   } else if (isAxs) {
     console.log("[FIFA Ticket Scout] Running on AXS (passive capture, endpoint unconfirmed) build " + BUILD_STAMP);
+  } else if (isVividSeats) {
+    console.log("[FIFA Ticket Scout] Running on Vivid Seats (passive capture) build " + BUILD_STAMP);
+  } else if (isGametime) {
+    console.log("[FIFA Ticket Scout] Running on Gametime (passive capture) build " + BUILD_STAMP);
   } else {
     console.log("[FIFA Ticket Scout] Unknown ticketing site - no action");
     return;
@@ -80,7 +86,34 @@
           ? ["/pac-api/"]
           : isTickPick
             ? ["/listings/internal/event-v2/"]
-            : isAxs
+            : isGametime
+              // Two payloads, both needed. Confirmed on event
+              // 68af55be0dcf1d7f796e5e89 (Rays at Rangers, Globe Life Field):
+              //
+              //   /v3/listings/<id>  421KB, 300 listings with section, row and
+              //                      the actual seat numbers
+              //   /v1/events         the only place the event name, date and
+              //                      venue appear; the listings payload has
+              //                      none of them, and the venue is what seat
+              //                      tiering keys off
+              //
+              // "/v1/events" also prefixes /v1/events/<id>/zone-configs, which
+              // is map geometry. Capturing it is harmless — background.js
+              // requires an `events` array before indexing anything — and the
+              // narrower alternative would miss the version bump that
+              // /v3/listings shows this API already does.
+              ? ["/v3/listings/", "/v1/events"]
+              : isVividSeats
+              // Confirmed on production 6965630 (Kacey Musgraves, CFG Bank
+              // Arena): 334KB, { global, tickets, groups, sections, i18n },
+              // 455 listings matching the page's own stated listingCount.
+              //
+              // Matched in full rather than on "listings" alone, because
+              // /hermes/api/v1/badging/productions/<id>/sold/listings is a
+              // different endpoint that returns an empty array — a looser
+              // pattern would capture it and parse 0 seats over the real data.
+              ? ["/hermes/api/v1/listings"]
+              : isAxs
               // Veritix is AXS's ticketing engine, and its start-flow response
               // is the largest JSON the ticket page fetches (611KB on a live
               // T-Mobile Center event) keyed by the same opaque event token as
@@ -108,7 +141,11 @@
     // For Ticketmaster, never auto-capture page requests — except Account
     // Manager, whose inventory only arrives that way.
     if (isTicketmaster && !isTicketmasterAM) return false;
-    // FIFA, SeatGeek, StubHub, Evenue and TickPick match on their own patterns.
+    // Every other site matches on its own pattern. Vivid Seats is in
+    // MATCH_PATTERNS now that its endpoint is known; before that it needed an
+    // explicit `return false` here, because with no pattern of its own it fell
+    // through to the FIFA fallback and would have captured a /performance/ url
+    // as if it were FIFA seat data.
     return MATCH_PATTERNS.some((p) => url.includes(p));
   }
 
@@ -280,8 +317,9 @@
   //
   // Set to a short site tag ("EV", "SH", "SG", …) to hunt a new site's
   // inventory endpoint; null once that site is parsed.
-  // Account Manager is parsed now (venueAvailability + priceData, captured
-  // passively). Set this to a short site tag again to map the next source.
+  // Both Vivid Seats and Gametime are parsed now. Set this to a short site tag
+  // ("EV", "SH", "SG", …) to map the next source; package-check.js blocks a
+  // release while it is non-null.
   const DISCOVERY_SITE = null;
   const PROBE_MIN_CHARS = 2000;
   // Small JSON bodies are printed in full up to this size while a site is
@@ -671,6 +709,9 @@
 
     for (const pick of picks) {
       const scored = score(pick);
+      // The best-scoring array is the one most likely to BE the inventory, so
+      // it gets a much longer sample than the runners-up.
+      const isTop = pick === picks[0];
       console.log(`${tag}   CANDIDATE ${pick.path} (${pick.count} items, score ${scored})`);
       if (pick.keys.length) console.log(`${tag}   ALL KEYS: ${pick.keys.join(",").slice(0, 600)}`);
 
@@ -694,11 +735,29 @@
         for (const i of want) {
           if (objs[i] !== undefined && !picks.includes(objs[i])) picks.push(objs[i]);
         }
+        // Blind spot #6, found on Gametime: this was a flat 1000-char cap, and
+        // a listing there runs past it — so `seats`, `spot` and everything
+        // after them was invisible, which is to say the section and row were.
+        // The five earlier sites all happened to fit, which is exactly why the
+        // cap survived that long.
+        //
+        // The top candidate's FIRST element is now printed whole, because that
+        // is the row whose field meanings have to be worked out. Its other two
+        // samples, and the runners-up, keep a shorter cap: those exist to show
+        // that element 0 is representative, and printing three 4kB objects per
+        // array would push the real payload out of the console buffer.
+        const TOP_FIRST_CHARS = 4000;
+        const OTHER_CHARS = 1000;
         picks.forEach((obj, n) => {
           const json = JSON.stringify(obj);
           const label = n === 0 ? "first" : n === picks.length - 1 ? "last" : "middle";
-          for (let i = 0; i < Math.min(json.length, 1000); i += 500) {
+          const cap = (isTop && n === 0) ? TOP_FIRST_CHARS : OTHER_CHARS;
+          const shown = Math.min(json.length, cap);
+          for (let i = 0; i < shown; i += 500) {
             console.log(`${tag}   ${label}[${i}]: ${json.slice(i, i + 500)}`);
+          }
+          if (json.length > shown) {
+            console.log(`${tag}   ${label}[...]: truncated at ${shown} of ${json.length} chars`);
           }
         });
       }
@@ -735,6 +794,8 @@
         : isEvenue ? window.__evenueAdapter
         : isTickPick ? window.__tickpickAdapter
         : isAxs ? window.__axsAdapter
+        : isGametime ? window.__gametimeAdapter
+        : isVividSeats ? window.__vividseatsAdapter
         : null;
       return adapter ? adapter.getEventInfo() : undefined;
     } catch (e) {
@@ -847,6 +908,39 @@
       sizeParams: [],
       indexParams: [],
     },
+    gametime: {
+      tag: "GT",
+      listingsKey: "listings",
+      // A plain GET, so there is no body to rewrite — the filters are all in
+      // the query string:
+      //   /v3/listings/<id>?all_in_pricing=true&quantity=2&jitter_cheapest=0
+      //
+      // `quantity` is the one that narrows the inventory: the page asks for
+      // whatever the quantity selector is set to, and the response comes back
+      // holding only listings sold in that lot size. Dropping it asks the same
+      // endpoint for the unfiltered set.
+      //
+      // `all_in_pricing` is deliberately NOT dropped. It is not a filter, it
+      // decides whether price.total is the all-in figure or the pre-fee one,
+      // and losing it would silently change what every captured price MEANS
+      // rather than how many of them arrive.
+      bodyVariants: null,
+      queryStrategies: true,
+      // NOT dropped: the endpoint answers HTTP 400 without it. Confirmed live —
+      // both non-credentialed attempts reached the server and both were
+      // refused, so `quantity` is required rather than merely honoured.
+      dropParams: [],
+      // Swept instead. The page asks for whatever its quantity selector shows
+      // and gets back only listings sold in that lot size, so the way to the
+      // whole event is to ask once per lot size. 1-8 covers what the selector
+      // offers; each response is merged and duplicates are dropped by listing
+      // id, so overlapping lot sizes cost a request, not correctness.
+      sweepParam: { name: "quantity", values: [1, 2, 3, 4, 5, 6, 7, 8] },
+      // No page-size or offset parameter was observed on this endpoint; the
+      // first response carried 300 listings in one go.
+      sizeParams: [],
+      indexParams: [],
+    },
   };
 
   const FOLLOW_UP_MAX_PAGES = 10;
@@ -860,23 +954,34 @@
   let followUpDone = false;
 
   function followUpConfig() {
-    return isStubHub ? FOLLOW_UP_SITES.stubhub : null;
+    return isStubHub ? FOLLOW_UP_SITES.stubhub
+      : isGametime ? FOLLOW_UP_SITES.gametime
+      : null;
   }
 
   // The biggest number under a total-looking key, at any depth. Sites move this
   // between response versions, so match on the key name rather than a fixed
   // path — but never on `per_page`, `page_size` or `total_pages`, which look
   // like totals and are not counts of listings.
-  function inventoryTotal(node, depth) {
+  //
+  // `skipKey` is the listings array itself, and skipping it is not an
+  // optimisation. A Gametime listing holds price: { total: 3000, ... } — cents
+  // — so walking into the array made a $30.00 seat look like a reported total
+  // of 3000. On an event whose listing count exceeded its top price in cents,
+  // `have >= total` would then read as "the first response already holds
+  // everything" and cancel the follow-up outright. A total is always a sibling
+  // of the collection it counts, never a field inside its elements.
+  function inventoryTotal(node, depth, skipKey) {
     if (!node || typeof node !== "object" || (depth || 0) > 4) return null;
     let best = null;
     Object.keys(node).forEach((key) => {
+      if (skipKey && key === skipKey) return;
       const value = node[key];
       if (typeof value === "number" && value > 0 && /total|count/i.test(key)
           && !/page|per|size/i.test(key)) {
         if (best == null || value > best) best = value;
       } else if (value && typeof value === "object") {
-        const inner = inventoryTotal(value, (depth || 0) + 1);
+        const inner = inventoryTotal(value, (depth || 0) + 1, skipKey);
         if (inner != null && (best == null || inner > best)) best = inner;
       }
     });
@@ -893,18 +998,76 @@
     );
   }
 
+  // How to repeat the page's request, best fidelity first.
+  //
+  // This was a single attempt — captured headers plus credentials — which is
+  // right for StubHub and fails outright on Gametime. The page is served from
+  // gametime.co while the API lives on mobile.gametime.co, so the follow-up is
+  // cross-origin, and there `credentials: "include"` is rejected by the
+  // browser whenever the server answers with `Access-Control-Allow-Origin: *`.
+  // Replayed headers can fail the same way by forcing a preflight the endpoint
+  // does not answer. Both surface identically, as a bare "Failed to fetch",
+  // which is what stopped the whole follow-up with 283 of the listings in
+  // hand.
+  //
+  // So each combination is tried in turn. Fidelity first, because a request
+  // that looks exactly like the page's own is the one most likely to be served
+  // by a bot-protected endpoint; the plainer attempts are the fallback, not
+  // the preference.
+  function fetchStrategies() {
+    const out = [];
+    if (capturedHeaders) {
+      out.push({ label: "page headers + cookies", headers: capturedHeaders, credentials: "include" });
+      out.push({ label: "page headers, no cookies", headers: capturedHeaders, credentials: "omit" });
+    }
+    out.push({ label: "cookies only", credentials: "include" });
+    out.push({ label: "plain request", credentials: "omit" });
+    return out;
+  }
+
+  // The combination that worked last time, so a sweep does not re-fail its way
+  // down the list on every request. Gametime's quantity sweep is eight calls,
+  // and without this each one first burned a request on the credentialed
+  // attempt the browser always rejects — double the traffic to a
+  // bot-protected endpoint for a refusal that was already known.
+  let workingStrategy = null;
+
   async function fetchInventory(url) {
     // `originalFetch` is declared further down, with the fetch patch. That is
     // fine because nothing here runs at load time — the first call comes from
     // inside the hook, long after. Do not call this during setup.
-    //
-    // Same headers the page used, so this is indistinguishable from its own
-    // request. `capturedHeaders` is filled by the hooks below on first sight.
-    const init = { credentials: "include" };
-    if (capturedHeaders) init.headers = capturedHeaders;
-    const response = await originalFetch.call(window, url, init);
-    if (!response.ok) throw new Error("HTTP " + response.status);
-    return response.json();
+    const tag = (followUpConfig() || {}).tag || "FU";
+    const all = fetchStrategies();
+    // Whatever worked last goes first; the rest stay in order behind it, so a
+    // strategy that stops working falls back rather than failing outright.
+    const strategies = workingStrategy
+      ? [workingStrategy].concat(all.filter((s) => s.label !== workingStrategy.label))
+      : all;
+    let lastError = null;
+
+    for (let i = 0; i < strategies.length; i++) {
+      const s = strategies[i];
+      try {
+        const init = { credentials: s.credentials };
+        if (s.headers) init.headers = s.headers;
+        const response = await originalFetch.call(window, url, init);
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        const json = await response.json();
+        if (i > 0 || !workingStrategy) {
+          console.log(`[${tag}] follow-up succeeded with "${s.label}"`);
+        }
+        workingStrategy = s;
+        return json;
+      } catch (e) {
+        lastError = e;
+        // Named, so the next round trip is not blind about which combination
+        // the endpoint actually refused.
+        console.log(`[${tag}] follow-up attempt "${s.label}" failed: ${e && e.message}`);
+        // It stopped working; do not keep leading with it.
+        if (workingStrategy && s.label === workingStrategy.label) workingStrategy = null;
+      }
+    }
+    throw lastError || new Error("no fetch strategy succeeded");
   }
 
   // Every listing id anywhere in a response.
@@ -1001,7 +1164,7 @@
     followUpDone = true;
 
     const have = first.length;
-    const total = inventoryTotal(body, 0);
+    const total = inventoryTotal(body, 0, config.listingsKey);
     const params = [...url.searchParams.keys()];
 
     // The request is what has to be broadened, so describe it fully: the query
@@ -1214,6 +1377,40 @@
             `requested in batches, so it will still fill in as you scroll.`);
         }
         if (added || !config.queryStrategies) return;
+      }
+
+      // 0c. Sweep a required filter across its values.
+      //
+      // Dropping a filter is the better move when the endpoint allows it,
+      // because it is one request. This is for the endpoints that do not:
+      // Gametime returns 400 without `quantity`, so the only way to the rest
+      // of the inventory is to ask for each lot size in turn.
+      if (config.sweepParam) {
+        const name = config.sweepParam.name;
+        const current = url.searchParams.get(name);
+        let swept = 0;
+        for (const value of config.sweepParam.values) {
+          if (String(value) === String(current)) continue;   // already have it
+          const next = new URL(url.href);
+          next.searchParams.set(name, String(value));
+          let page;
+          try {
+            page = await fetchInventory(next.href);
+          } catch (e) {
+            console.log(`[${tag}] ${name}=${value} failed: ${e && e.message}`);
+            continue;
+          }
+          const got = (listingsOf(page, config.listingsKey) || []).length;
+          const fresh = send(next.href, page);
+          added += fresh;
+          swept++;
+          console.log(`[${tag}] ${name}=${value}: ${got} listing(s), ${fresh} new`);
+        }
+        if (swept) {
+          console.log(`[${tag}] swept ${name} over ${swept} value(s): ` +
+            `${added} listing(s) beyond the ${have} the page fetched itself`);
+        }
+        if (added) return;
       }
 
       // 1. Drop the filters from the query string, for sites that put them there.

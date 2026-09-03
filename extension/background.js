@@ -146,6 +146,8 @@ function siteFromUrl(url) {
     if (h.includes("stubhub")) return "stubhub";
     if (h.includes("evenue")) return "evenue";
     if (h.includes("tickpick")) return "tickpick";
+    if (h.includes("vividseats")) return "vividseats";
+    if (h.includes("gametime")) return "gametime";
     if (h.includes("axs")) return "axs";
     if (h.includes("-resale-")) return "resale";
     if (h.includes("-shop-"))   return "lms";
@@ -756,6 +758,52 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
     if (eventId) {
       await enforceGameLimit(`${site}:${eventId}`);
       await saveTickPickSeats(eventId, body, tabId, site, eventInfo);
+    }
+  }
+
+  // Vivid Seats listings — captured passively from the page's own API call.
+  // GET www.vividseats.com/hermes/api/v1/listings?productionId=<id>&currency=USD
+  // Note the near-miss: /hermes/api/v1/badging/productions/<id>/sold/listings
+  // also ends in "listings" and carries an empty array, so the path is matched
+  // in full rather than on the word alone.
+  if (site === "vividseats" && url.includes("/hermes/api/v1/listings") &&
+      body && Array.isArray(body.tickets)) {
+    const m = url.match(/[?&]productionId=(\d+)/i);
+    const eventId = m ? m[1]
+      : String((body.global && body.global.productionId) || "");
+    if (eventId) {
+      await enforceGameLimit(`${site}:${eventId}`);
+      await saveVividSeatsSeats(eventId, body, tabId, site, eventInfo);
+    } else {
+      bgLog("[background] Vivid Seats: no production id in " + url.split("?")[0]);
+    }
+  }
+
+  // Gametime. Two endpoints, both captured passively:
+  //
+  //   mobile.gametime.co/v1/events?...        who is playing, where, when
+  //   mobile.gametime.co/v3/listings/<id>?... the inventory
+  //
+  // Only the listings payload carries seats, and it carries NO event name,
+  // date or venue — so /v1/events is indexed as it arrives and read back by
+  // event id. Order is not assumed: the events call fired first on the
+  // observed page, but the index is keyed so either order works, and a scan
+  // with neither still stores seats and falls back to JSON-LD for identity.
+  if (site === "gametime" && /\/v\d+\/events(\?|$)/.test(url) && body &&
+      Array.isArray(body.events)) {
+    gametimeIndexEvents(body);
+  }
+
+  if (site === "gametime" && url.includes("/v3/listings/") && body &&
+      Array.isArray(body.listings)) {
+    const m = url.match(/\/v3\/listings\/([A-Za-z0-9]+)/);
+    const eventId = m ? m[1]
+      : String(((body.listings[0] || {}).event_id) || "");
+    if (eventId) {
+      await enforceGameLimit(`${site}:${eventId}`);
+      await saveGametimeSeats(eventId, body, tabId, site, eventInfo, url);
+    } else {
+      bgLog("[background] Gametime: no event id in " + url.split("?")[0]);
     }
   }
 
@@ -2129,6 +2177,420 @@ async function saveTickPickSeats(eventId, body, tabId, site, eventInfo) {
   bgLog(`[background] TickPick: ${total} seats from ${body.listings.length} listings` +
     (parking ? `, ${parking} parking excluded` : "") +
     (missingPrice ? `, ${missingPrice} had no price` : ""));
+
+  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].site = site;
+  games[gameKey].lastScanned = Date.now();
+
+  if (tabId) tabGameMap[tabId] = gameKey;
+  await chrome.storage.local.set({ games });
+}
+
+// ─── Vivid Seats ──────────────────────────────────────────────────────────
+// GET www.vividseats.com/hermes/api/v1/listings?productionId=<id>&currency=USD
+//
+// Top level: { global, tickets, groups, sections, i18n }. `tickets` is the
+// inventory — 455 listings on the Kacey Musgraves capture, against a stated
+// listingCount of 455 and ticketCount of 1607.
+//
+// Every field below was read off that capture, not guessed. Each listing
+// carries the same value twice, once short and once spelled out:
+//
+//   s / sectionName           "Section 208"
+//   r / row                   "G"
+//   q / quantity              "1"      seats in this listing
+//   p                         "33.15"  price per ticket, before fees
+//   aip / allInPricePerTicket "47.00"  price per ticket, fees included
+//   i                         "VB17016531865"  listing id
+//   d                         "208"    section id  -> sections[].i
+//   c                         "408358" group id    -> sections[].g
+//   m                         "1,2,3,4,5,6"  purchasable splits, NOT quantity
+//   n                         delivery/entry note
+//   badges / perks            ["Lowest Price in Section"], ["Seated Together"]
+//   stp                       "Ticketmaster Transfer"
+//
+// The long and short names held identical values in all three sampled rows,
+// so the long name is preferred and the short one is the fallback.
+
+// Vivid quotes two prices and the page has a toggle between them. `aip` is
+// what the buyer actually pays, which is the number the other marketplaces in
+// this extension already report, so it wins. FEE_MULTIPLIER_BY_SITE stays 1.0
+// because the fee is already inside this figure — do not stack another on it.
+function vividSeatsPrice(listing) {
+  const candidates = [listing.allInPricePerTicket, listing.aip, listing.p];
+  for (const c of candidates) {
+    const n = typeof c === "string" ? parseFloat(c) : c;
+    if (typeof n === "number" && isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+// No is-parking flag was present on any sampled listing, so this reads the
+// section name.
+function vividSeatsIsParking(listing) {
+  const name = String(listing.sectionName || listing.s || "");
+  return /\bparking\b|\blot\s*[0-9]+\b/i.test(name);
+}
+
+// Anything a buyer would want to see before committing: the badges Vivid
+// shows on the listing, its perks, and how the ticket is delivered.
+function vividSeatsAttributes(listing) {
+  const out = [];
+  if (Array.isArray(listing.badges)) {
+    for (const b of listing.badges) {
+      const t = b && (b.title || b.category);
+      if (t) out.push(String(t));
+    }
+  }
+  if (Array.isArray(listing.perks)) {
+    for (const perk of listing.perks) if (perk) out.push(String(perk));
+  }
+  const delivery = String(listing.stp || "").trim();
+  if (delivery) out.push(delivery);
+  return out;
+}
+
+// Group id -> group name, for the Area column.
+//
+// `sections[].g` is the group a section belongs to (both "Section 102" and
+// "Section 104" sat under 408357), and a listing's `c` is that same id. Which
+// field on a `groups` row carries the id was NOT observable — the probe
+// printed the group key list but no sample row — so every plausible id field
+// is indexed. An unresolved id leaves Area blank, which is what the other
+// resale parsers do anyway.
+function vividSeatsGroupNames(body) {
+  const byId = {};
+  const groups = Array.isArray(body.groups) ? body.groups : [];
+  for (const g of groups) {
+    if (!g) continue;
+    const name = g.n != null ? String(g.n) : "";
+    if (!name) continue;
+    for (const idField of [g.i, g.g, g.c]) {
+      if (idField != null && idField !== "") byId[String(idField)] = name;
+    }
+  }
+  return byId;
+}
+
+async function saveVividSeatsSeats(eventId, body, tabId, site, eventInfo) {
+  if (!body || !Array.isArray(body.tickets)) return;
+
+  const gameKey = `${site}:${eventId}`;
+  const data = await getStorage();
+  const games = data.games || {};
+  if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  // The payload names the event and the venue itself, so a failed JSON-LD read
+  // is not fatal here the way it is on sites that publish nothing. JSON-LD
+  // still wins when present: it carries the date, which this payload does not
+  // expose in any field whose meaning was confirmed.
+  const globalInfo = body.global || {};
+  const payloadName = globalInfo.productionName ? String(globalInfo.productionName) : null;
+  const payloadVenue = globalInfo.mapTitle ? String(globalInfo.mapTitle) : null;
+  const name = (eventInfo && eventInfo.name) || payloadName;
+
+  if (name) {
+    const prev = games[gameKey].match || {};
+    games[gameKey].match = {
+      name,
+      date: (eventInfo && eventInfo.date) || prev.date || null,
+      venue: (eventInfo && eventInfo.venue) || payloadVenue || prev.venue || null,
+      currency: "USD",
+      performanceId: eventId,
+    };
+  }
+
+  const venueName = games[gameKey].match && games[gameKey].match.venue;
+  logTierMapping(venueName);
+
+  const groupNames = vividSeatsGroupNames(body);
+  const seats = {};
+  let parking = 0;
+  let missingPrice = 0;
+
+  try {
+    for (const listing of body.tickets) {
+      if (!listing) continue;
+      if (vividSeatsIsParking(listing)) { parking++; continue; }
+
+      const dollars = vividSeatsPrice(listing);
+      if (dollars == null) { missingPrice++; continue; }
+      // Stored in thousandths to match centsToUSD() in the popup.
+      const price = Math.round(dollars * 1000);
+
+      const block = String(listing.sectionName || listing.s || "");
+      const row = String(listing.row || listing.r || "");
+      // `m` is the split list, not the count — reading it here would turn a
+      // one-seat listing that sells in 1,2,3,4,5,6 into six phantom seats.
+      const qty = Number(listing.quantity || listing.q) || 1;
+      const area = groupNames[String(listing.c)] || "";
+      const attributes = vividSeatsAttributes(listing);
+      const note = String(listing.n || "");
+      const accessible = /\b(ada|accessible|wheelchair)\b/i.test(block + " " + note);
+      const listingId = String(listing.i || (block + "-" + row));
+
+      // Vivid publishes no seat numbers on resale listings — only section, row
+      // and how many are available — so a listing of N becomes N seats with an
+      // empty seat field, exactly as TickPick does.
+      for (let i = 0; i < qty; i++) {
+        seats[`${listingId}-${i}`] = {
+          block,
+          row,
+          seat: "",
+          area,
+          category: "resale",
+          tier: VenueTiers.tierFor(venueName, block, row),
+          price,
+          exclusive: true,
+          site: "vividseats",
+          accessible,
+          attributes,
+        };
+      }
+    }
+  } catch (error) {
+    bgLog("[background] Error parsing Vivid Seats listings:", error.message);
+  }
+
+  const total = Object.keys(seats).length;
+  bgLog(`[background] Vivid Seats: ${total} seats from ${body.tickets.length} listings` +
+    (parking ? `, ${parking} parking excluded` : "") +
+    (missingPrice ? `, ${missingPrice} had no price` : "") +
+    (globalInfo.ticketCount ? `, page states ${globalInfo.ticketCount}` : ""));
+
+  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].site = site;
+  games[gameKey].lastScanned = Date.now();
+
+  if (tabId) tabGameMap[tabId] = gameKey;
+  await chrome.storage.local.set({ games });
+}
+
+// ─── Gametime ─────────────────────────────────────────────────────────────
+// GET mobile.gametime.co/v3/listings/<eventId>?all_in_pricing=true&quantity=N
+//
+// Top level: { lot, available_lots, listings, display_groups, display_filters }.
+// A listing, read off the capture on event 68af55be0dcf1d7f796e5e89
+// (Rays at Rangers, Globe Life Field):
+//
+//   id             "6941d5d94c87f865d0bcf87d"
+//   price          { prefee: 2300, total: 3000, sales_tax: 229,
+//                    pre_tax_total: 2771 }        ← CENTS, not dollars
+//   seats          ["15","16"]                    ← actual seat numbers
+//   spot           { section: "224", row: "5", section_group: "Middle",
+//                    position: {x,y}, view_url }
+//   available_lots [2]            purchasable lot sizes, NOT a count
+//   disclosures    []             see gametimeDisclosures
+//   delivery_type  "direct" | "mobile"
+//   event_id       "68af55be0dcf1d7f796e5e89"
+//
+// Gametime is the only source here that publishes seat NUMBERS on resale
+// listings — every other marketplace stops at section and row.
+//
+// Prices are in cents and `all_in_pricing=true` is in the query, so
+// price.total is the all-in figure. FEE_MULTIPLIER_BY_SITE stays 1.0.
+
+// The two dollars-per-ticket figures are `total` (all-in) and `prefee`. Same
+// call as Vivid Seats: report what the buyer actually pays.
+//
+// Cents, so divide. A parser that treated 3000 as dollars would report a $30
+// seat as $3,000 — and it would look plausible next to a real premium listing,
+// which is why this is asserted rather than assumed.
+function gametimePrice(listing) {
+  const p = listing && listing.price;
+  if (!p) return null;
+  for (const c of [p.total, p.pre_tax_total, p.prefee]) {
+    const n = typeof c === "string" ? parseFloat(c) : c;
+    if (typeof n === "number" && isFinite(n) && n > 0) return n / 100;
+  }
+  return null;
+}
+
+// Parking is sold as a separate event on Gametime (event.related_events.parking
+// holds its id), so a parking pass should not appear in a normal listings
+// payload at all. The name check is defensive only.
+function gametimeIsParking(listing) {
+  const spot = (listing && listing.spot) || {};
+  const name = String(spot.section || "") + " " + String(spot.section_group || "");
+  return /\bparking\b|\blot\s*[0-9]+\b/i.test(name);
+}
+
+// `disclosures` was an empty array on every sampled listing, so its element
+// type is unconfirmed. The site's /v1/disclosures endpoint returns objects of
+// { slug, title, icon_url, ... }, which suggests either bare slugs or those
+// objects appear here — both are handled rather than guessing one.
+function gametimeDisclosures(listing) {
+  const out = [];
+  const raw = listing && listing.disclosures;
+  if (!Array.isArray(raw)) return out;
+  for (const d of raw) {
+    if (!d) continue;
+    if (typeof d === "string") out.push(d);
+    else if (d.title) out.push(String(d.title));
+    else if (d.slug) out.push(String(d.slug));
+  }
+  const delivery = String((listing && listing.delivery_type) || "").trim();
+  if (delivery) out.push(delivery);
+  return out;
+}
+
+// event_id -> { name, date, venue }, filled from /v1/events.
+//
+// A single page issues several events calls: one for this event by id, and
+// broader ones by performer that return a hundred other fixtures. Indexing by
+// id rather than taking events[0] is what keeps a neighbouring fixture's name
+// off this event.
+const gametimeEvents = {};
+
+// event-info.js normalises dates to "DD-MM-YYYY - HH:MM" for the popup, and it
+// is a page-context script the service worker cannot import. Reimplemented to
+// the same contract; event-info-check.js asserts the shared format.
+function gametimeEventDate(iso) {
+  if (typeof iso !== "string") return null;
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/);
+  if (!m) return null;
+  return `${m[3]}-${m[2]}-${m[1]}` + (m[4] ? ` - ${m[4]}:${m[5]}` : "");
+}
+
+function gametimeIndexEvents(body) {
+  const rows = Array.isArray(body.events) ? body.events : [];
+  let added = 0;
+  for (const row of rows) {
+    const ev = row && row.event;
+    if (!ev || !ev.id) continue;
+    const venue = row.venue && row.venue.name ? String(row.venue.name) : null;
+    gametimeEvents[String(ev.id)] = {
+      name: ev.name ? String(ev.name) : null,
+      // datetime_local is the venue's own clock, which is what a buyer reads
+      // on the ticket; datetime_utc is the fallback.
+      date: gametimeEventDate(ev.datetime_local || ev.datetime_utc),
+      venue,
+    };
+    added++;
+  }
+  if (added) bgLog(`[background] Gametime: indexed ${added} event(s) for identity`);
+}
+
+async function saveGametimeSeats(eventId, body, tabId, site, eventInfo, url) {
+  if (!body || !Array.isArray(body.listings)) return;
+
+  const gameKey = `${site}:${eventId}`;
+  const data = await getStorage();
+  const games = data.games || {};
+  if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  // JSON-LD first, then whatever /v1/events told us about this id.
+  const indexed = gametimeEvents[String(eventId)] || {};
+  const name = (eventInfo && eventInfo.name) || indexed.name;
+
+  if (name) {
+    const prev = games[gameKey].match || {};
+    games[gameKey].match = {
+      name,
+      date: (eventInfo && eventInfo.date) || indexed.date || prev.date || null,
+      venue: (eventInfo && eventInfo.venue) || indexed.venue || prev.venue || null,
+      currency: "USD",
+      performanceId: eventId,
+    };
+  }
+
+  const venueName = games[gameKey].match && games[gameKey].match.venue;
+  logTierMapping(venueName);
+
+  const seats = {};
+  let parking = 0;
+  let missingPrice = 0;
+  let withSeatNumbers = 0;
+  // Seat numbers high enough to be suspect. "Seats 999-1000" showed up in
+  // Block 312 Row 4, and blocks do not hold a thousand seats — so either
+  // Gametime uses high values as a placeholder for seats it will not name, or
+  // something here is misreading them. Which one is answered by WHERE they
+  // appear: a placeholder repeats the same one or two values across many
+  // unrelated blocks, whereas real seats are scattered and confined.
+  const highNumbers = [];
+
+  try {
+    for (const listing of body.listings) {
+      if (!listing) continue;
+      if (gametimeIsParking(listing)) { parking++; continue; }
+
+      const dollars = gametimePrice(listing);
+      if (dollars == null) { missingPrice++; continue; }
+      // Stored in thousandths to match centsToUSD() in the popup.
+      const price = Math.round(dollars * 1000);
+
+      const spot = listing.spot || {};
+      const block = String(spot.section || "");
+      const row = String(spot.row || "");
+      const area = String(spot.section_group || "");
+      const attributes = gametimeDisclosures(listing);
+      const listingId = String(listing.id || `${block}-${row}`);
+
+      // Gametime publishes the seat numbers themselves. `available_lots` is
+      // the list of purchasable lot SIZES ([2] means "sold as a pair"), so a
+      // parser reading it as a count would be wrong the moment a listing
+      // offers more than one lot size.
+      const numbers = Array.isArray(listing.seats)
+        ? listing.seats.filter((n) => n !== null && n !== undefined && n !== "")
+        : [];
+      if (numbers.length) withSeatNumbers++;
+      const qty = numbers.length ||
+        Math.max.apply(null, [1].concat(
+          (Array.isArray(listing.available_lots) ? listing.available_lots : [])
+            .map(Number).filter((n) => isFinite(n) && n > 0)));
+
+      for (let i = 0; i < qty; i++) {
+        const n = numbers[i] != null ? parseInt(String(numbers[i]), 10) : NaN;
+        if (isFinite(n) && n >= 900) highNumbers.push({ block, row, n });
+        seats[`${listingId}-${i}`] = {
+          block,
+          row,
+          seat: numbers[i] != null ? String(numbers[i]) : "",
+          area,
+          category: "resale",
+          tier: VenueTiers.tierFor(venueName, block, row),
+          price,
+          exclusive: true,
+          site: "gametime",
+          accessible: /\b(ada|accessible|wheelchair)\b/i.test(block + " " + area),
+          attributes,
+        };
+      }
+    }
+  } catch (error) {
+    bgLog("[background] Error parsing Gametime listings:", error.message);
+  }
+
+  if (highNumbers.length) {
+    const values = [...new Set(highNumbers.map((h) => h.n))].sort((a, b) => a - b);
+    const places = new Set(highNumbers.map((h) => h.block + "/" + h.row));
+    bgLog(`[background] Gametime: ${highNumbers.length} seat number(s) >= 900, ` +
+      `across ${places.size} block/row combination(s). Values: ` +
+      `${values.slice(0, 12).join(", ")}${values.length > 12 ? ", …" : ""}. ` +
+      `Blocks: ${[...new Set(highNumbers.map((h) => h.block))].slice(0, 8).join(", ")}. ` +
+      `A handful of values repeating across many blocks means these are ` +
+      `placeholders rather than seats.`);
+  }
+
+  const total = Object.keys(seats).length;
+  bgLog(`[background] Gametime: ${total} seats from ${body.listings.length} listings` +
+    (withSeatNumbers ? `, ${withSeatNumbers} with seat numbers` : "") +
+    (parking ? `, ${parking} parking excluded` : "") +
+    (missingPrice ? `, ${missingPrice} had no price` : ""));
+
+  // The page asks for a quantity, and the response honours it: the observed
+  // request carried quantity=2 and every listing came back as a pair. So this
+  // is the inventory for ONE lot size, not the whole event. Say so rather than
+  // let a filtered count read as a complete scan.
+  // Each payload is one lot size. injected.js sweeps the rest automatically,
+  // so this names the slice rather than asking anyone to go clicking — the
+  // earlier wording told people to change the quantity selector by hand, which
+  // stopped being true the moment the sweep landed.
+  const q = (String(url || "").match(/[?&]quantity=(\d+)/) || [])[1];
+  if (q) {
+    bgLog(`[background] Gametime: this payload is the quantity=${q} slice; ` +
+      `the page-side sweep requests the other lot sizes and they merge in here.`);
+  }
 
   games[gameKey].seats = { ...games[gameKey].seats, ...seats };
   games[gameKey].site = site;

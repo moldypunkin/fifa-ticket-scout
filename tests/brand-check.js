@@ -39,7 +39,9 @@ for (const s of new Set(sites)) {
 
 // 4. setBrand is called on each path that can change which site is displayed.
 // Exclude the `function setBrand(site)` declaration itself.
-const calls = [...js.matchAll(/(?<!function )setBrand\((.*?)\)/g)].map((m) => m[1]);
+// [\s\S] not . — a setBrand call may wrap across lines, and a single-line
+// regex silently stopped seeing it, which reads as a missing call site.
+const calls = [...js.matchAll(/(?<!function )setBrand\(([\s\S]*?)\)\s*;/g)].map((m) => m[1]);
 // Call sites grow as sources are added, so assert coverage of the paths
 // that matter rather than an exact count.
 check("setBrand called on every display path", calls.length >= 3, calls.join(" | "));

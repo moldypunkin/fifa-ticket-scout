@@ -4,6 +4,64 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## September 3, 2026 — v2.7.0
+
+### Marketplace Adapters: Vivid Seats and Gametime
+
+Two more sources, both passive capture, bringing the count to nine. Same shape as the four before them: an adapter that recognises the event page and resolves its id, `injected.js` routing the capture, `background.js` normalising the response.
+
+**Vivid Seats** — `GET www.vividseats.com/hermes/api/v1/listings?productionId=<id>`. 455 listings on the event it was mapped against, matching the page's own stated `listingCount`. Each listing carries every value twice, once abbreviated and once spelled out (`s`/`sectionName`, `r`/`row`, `q`/`quantity`); the long name is preferred and the short one is the fallback.
+
+Two fields needed care. `aip`/`allInPricePerTicket` is the all-in price and `p` is pre-fee — a 42% gap on the cheapest row — so the all-in figure is what gets reported, and `FEE_MULTIPLIER_BY_SITE` stays at 1.0 because the fee is already inside it. And `m` is the list of purchasable splits, not a count: reading it as quantity would turn a one-seat listing that sells in 1,2,3,4,5,6 into six phantom seats.
+
+The near-miss endpoint `/hermes/api/v1/badging/productions/<id>/sold/listings` also ends in "listings" and returns an empty array, so the path is matched in full rather than on the word.
+
+**Gametime** — `GET mobile.gametime.co/v3/listings/<eventId>?all_in_pricing=true&quantity=N`, plus `/v1/events` for identity. It is the only source here that publishes seat NUMBERS on resale listings; every other marketplace stops at section and row.
+
+Prices are in **cents** (`price.total: 3000` is $30.00), which is worth stating plainly because reading them as dollars produces figures that look plausible next to a genuine premium listing. `available_lots: [2]` is the list of purchasable lot sizes, not a count — it happened to equal `seats.length` on the sampled row, so a parser reading the wrong field is right by luck there and wrong on any multi-lot listing.
+
+The listings payload carries no event name, date or venue; those exist only in `/v1/events`, which a single page load fetches several times, once for this event and again for a hundred other fixtures at the same venue. Events are indexed **by id** rather than taking `events[0]`, or a neighbouring game would name this one.
+
+### Gametime: The Page's Request Is Filtered
+
+`/v3/listings` honours the page's quantity selector and returns only listings sold in that lot size, so a single capture is a slice — 282 listings out of 766 on the event this was measured against.
+
+`quantity` cannot simply be dropped: the endpoint answers HTTP 400 without it. So it is swept, one request per lot size 1 through 8, with responses merged and duplicates dropped by listing id. That recovered 484 listings the page never asked for, `quantity=2` alone accounting for 248 of them.
+
+The follow-up also needed a retry ladder. The page is served from `gametime.co` while the API lives on `mobile.gametime.co`, so the request is cross-origin, and there a credentialed fetch is rejected outright whenever the server answers `Access-Control-Allow-Origin: *`. It surfaces as a bare "Failed to fetch", which previously ended the whole follow-up. Four combinations are now tried in order, fidelity first, each refusal named in the log; the one that works is remembered so an eight-request sweep does not re-fail its way down the list eight times.
+
+### Unnumbered Seats Were Being Dropped From the Dashboard
+
+Not new, and not specific to either new source. `buildAllClusters` tracked consumed seats by `seat + "_" + block + "_" + row`, so every seat WITHOUT a number in the same block and row shared one key and all but the first were skipped as already used.
+
+That is most of the inventory on several sources: TickPick, StubHub and Vivid Seats publish no seat numbers at all and store `""`, and Gametime returns `"*"` for seats it will not disclose. A Gametime listing of four unnumbered seats in one row displayed as one seat. Seats are now tracked by object identity, which is what "have I used this seat" actually means.
+
+Unnumbered seats in the same block, row and price are indistinguishable, so they share one row carrying a count rather than repeating as N identical lines. That row reports a **together-count of 1** however many seats it holds: nothing establishes that they adjoin — they may come from different listings — and offering seven of them as "7 together" would send someone after a block that does not exist. Real consecutive numbers still claim adjacency, because there the data supports it.
+
+### Open: Implausible Seat Numbers on Gametime
+
+"Seats 999-1000" appeared in one block. Blocks do not hold a thousand seats, so either Gametime uses high values as a placeholder for pairs it will not name, or something is misreading them.
+
+Unresolved, and deliberately not guessed at. The parser now reports every seat number at or above 900 together with how many distinct blocks and rows they appear across, because that is what separates the two explanations: a placeholder repeats a handful of values across many unrelated blocks, real seats are scattered and confined. The seats are stored either way — dropping real inventory on a hunch is worse than showing a number that looks odd.
+
+### Discovery Probe: Long Rows Were Cut Off
+
+Sixth blind spot found in this probe, and the same shape as the five before it: a limit that was fine for every site that happened to fit. Array samples were capped at a flat 1000 characters, and a Gametime listing runs past it — so `seats` and `spot`, which is to say the section and the row, were invisible. It cost a round trip.
+
+The top-scoring candidate's first row now prints up to 4000 characters, runners-up keep the short cap so one array cannot push the real payload out of the console buffer, and any truncation says so instead of ending mid-object.
+
+Separately, the follow-up's inventory-total heuristic walked into the listings array and read a Gametime listing's `price.total` of 3000 — cents — as a reported total of 3000 listings. Harmless on that event, but on one with more listings than its top price in cents it reads as "the first response already holds everything" and cancels the follow-up silently. A total is a sibling of the collection it counts, never a field inside its elements.
+
+### Tests
+
+29 suites, up from 20. New: `vividseats-check`, `vividseats-parse-check`, `vividseats-e2e-check`, `gametime-check`, `gametime-parse-check`, `gametime-e2e-check`, `gametime-followup-check`, `seat-collapse-check`.
+
+The parser fixtures are rows copied verbatim from the captures rather than retyped, which earlier work established as the difference between a suite that catches things and one that agrees with a mistake. The two e2e suites load `background.js` into a stubbed service worker and inspect what reaches storage — the only checks that would catch the right helpers wired together wrongly.
+
+`injected-load-check` was hardened after a site shipped with its flag, capture guard and discovery tag all correct and its branch missing from the site if/else chain: the chain ends in an `else` that returns before installing the fetch and XHR hooks, so the script bailed on load. The old assertion passed anyway, because "Unknown ticketing site" also contains "FIFA Ticket Scout". Each supported site is now checked for recognition and for hooks separately.
+
+---
+
 ## August 20, 2026 — v2.6.2
 
 ### Marketplace Adapters: SeatGeek, StubHub, Evenue, TickPick

@@ -188,6 +188,8 @@ out("--- each MAIN-world adapter, on its own site ---");
     ["evenue-adapter.js", "https://kuathletics.evenue.net/event/F26/02"],
     ["tickpick-adapter.js", "https://www.tickpick.com/buy-chiefs/6789012/"],
     ["axs-adapter.js", "https://www.axs.com/events/123456/chiefs"],
+    ["vividseats-adapter.js", "https://www.vividseats.com/nfl/chiefs-tickets/production/5432109"],
+    ["gametime-adapter.js", "https://gametime.co/nfl-football/chiefs-tickets/9-14-2026-denver/events/6512ab34cd56ef7890123456"],
   ];
   for (const pair of ADAPTERS) {
     const file = pair[0], href = pair[1];
