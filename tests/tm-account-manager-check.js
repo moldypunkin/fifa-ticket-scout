@@ -69,7 +69,11 @@ eq("discovery not armed for AM", /DISCOVERY_SITE = isTicketmasterAM/.test(inj), 
 eq("AM inventory is captured", /"\/v810\/venueAvailability\/", "\/v810\/priceData\/"/.test(inj), true);
 eq("AM parser present", /function saveAmSeats/.test(fs.readFileSync(EXT + "background.js", "utf8")), true);
 eq("scoped to the am host", /am\\.ticketmaster\\.com\$/.test(inj) || /am\.ticketmaster/.test(inj), true);
-eq("not armed for other sites", !/DISCOVERY_SITE = is(StubHub|SeatGeek|Evenue|TickPick|Axs)/.test(inj), true);
+// Deliberately NOT asserted here: that the probe is disarmed for every OTHER
+// site. Whether some site is currently in bring-up is a fact about that site,
+// not about Account Manager, and package-check.js already fails the build while
+// any probe is armed. Keeping it here meant mapping the next source broke this
+// suite for no reason it could explain.
 
 out(fail ? `\n${fail} FAILURES` : "\nall passed");
 process.exit(fail ? 1 : 0);

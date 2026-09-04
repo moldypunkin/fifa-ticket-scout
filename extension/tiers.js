@@ -265,11 +265,36 @@
   // ── resolution ───────────────────────────────────────────────────────────
   // The tier for one listing. Saved mapping wins; row-band rules pick by row;
   // else the heuristic. Never throws and never returns empty.
+  // The names a curated map might be keyed under, best first.
+  //
+  // Marketplaces prefix the level onto the section: AXS ships "Upper Level
+  // 330", "Club Level 227", "Lower Level 125", while the curated maps are keyed
+  // by the bare number the venue prints on the ticket — "330". An exact lookup
+  // misses every one of them, and the miss is silent, so the venue resolves
+  // (the dashboard says "149 mapped sections") while every seat quietly falls
+  // through to the section-text heuristic. That is what "not getting the venue
+  // tiers" looks like from the outside.
+  //
+  // The trailing number is only tried AFTER the full name, so a venue that
+  // genuinely keys sections as "UPPER LEVEL 330" still wins on the exact match.
+  function sectionKeys(section) {
+    const norm = normSec(section);
+    const keys = [norm];
+    const tail = norm.match(/(\d{1,4}[A-Z]?)$/);
+    if (tail && tail[1] !== norm) keys.push(tail[1]);
+    return keys;
+  }
+
   function tierFor(venue, section, row) {
     const data = root.VENUE_TIER_DATA || {};
     const m = (data.sections || {})[venueKey(venue)];
     if (m) {
-      const rules = m[normSec(section)];
+      const candidates = sectionKeys(section);
+      let rules = null;
+      for (let c = 0; c < candidates.length && !rules; c++) {
+        const hit = m[candidates[c]];
+        if (hit && hit.length) rules = hit;
+      }
       if (rules && rules.length) {
         // whole-section mapping (a single rule with no row range)
         if (rules.length === 1 && rules[0].from == null && rules[0].to == null) {

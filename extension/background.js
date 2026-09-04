@@ -807,11 +807,44 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
     }
   }
 
-  // AXS — bring-up only. No parser yet: the inventory payload has not been
-  // observed, and inventing field names for a shape nobody has seen is how the
-  // Evenue integration lost several rounds. Report what arrives, once per
-  // distinct shape, so one load names the endpoint and its structure.
-  if (site === "axs") {
+  // AXS. Three payloads, all captured passively:
+  //
+  //   /axsmarketplace/eventinfo group and section names aside, the ONLY
+  //                             payload with a date: name, localDate, venue
+  //   /axsmarketplace/mapinfo   group and section names, for the Area column
+  //   /axsmarketplace/offers    the inventory
+  //   /veritix/start-flow/v1    name and venue again, as a fallback
+  //
+  // mapinfo is indexed first when it arrives first; when it does not, the Area
+  // falls back to the section name's own prefix, so ordering is not load
+  // bearing. All three are keyed by the onsale token from the request url.
+  if (site === "axs" && url.includes("/axsmarketplace/mapinfo") && body) {
+    axsIndexMap(axsOnsaleToken(url), body);
+  }
+
+  if (site === "axs" && url.includes("/axsmarketplace/eventinfo") && body) {
+    axsIndexEventInfo(axsOnsaleToken(url), body);
+  }
+
+  if (site === "axs" && url.includes("/veritix/start-flow/") && body) {
+    axsIndexEvent(axsOnsaleToken(url), body);
+  }
+
+  if (site === "axs" && url.includes("/axsmarketplace/offers") &&
+      body && Array.isArray(body.listings)) {
+    const eventId = axsOnsaleToken(url);
+    if (eventId) {
+      await enforceGameLimit(`${site}:${eventId}`);
+      await saveAxsSeats(eventId, body, tabId, site, eventInfo);
+    } else {
+      bgLog("[background] AXS: no onsale token in " + url.split("?")[0]);
+    }
+  }
+
+  // Bring-up shape reporting, kept for the payloads that are NOT parsed. The
+  // offers endpoint was found this way after "/veritix/" turned out to be the
+  // session rather than the inventory.
+  if (site === "axs" && !/\/axsmarketplace\/(offers|mapinfo|eventinfo)/.test(url)) {
     const path = url.split("?")[0];
     // The start-flow payload is ~611KB; a five-level shape of it is long but
     // bounded (eight keys per level), and truncating keeps one response from
@@ -2366,6 +2399,281 @@ async function saveVividSeatsSeats(eventId, body, tabId, site, eventInfo) {
   await chrome.storage.local.set({ games });
 }
 
+// ─── AXS ──────────────────────────────────────────────────────────────────
+// GET unifiedapicommerce-us.axs.com/axsmarketplace/offers?onsaleID=<token>
+//
+// Top level: { meta, listings }. 1797 listings on the event this was mapped
+// against (Denver Broncos at Kansas City Chiefs, Arrowhead Stadium).
+//
+// A listing, read off that capture:
+//
+//   id            "VB17047084306"
+//   row           "40"
+//   quantity      10                       seats in this listing
+//   splits        [1,2,3,4,5,6,7,8,10]     purchasable lot sizes, NOT a count
+//   price         188                      per ticket, before fees
+//   allInPrice    225.34                   per ticket, fees included
+//   priceBreakdown { price: 188, serviceFee: 33.84, total: 225.34 }
+//   section       { id: 330, name: "Upper Level 330", longSectionName: … }
+//   groupId       424039                   -> mapinfo groups
+//   seatFeatures  ["Restricted/Obstructed View"]
+//   stockType     "Ticketmaster Transfer"
+//   isZoneSeating false
+//
+// Prices are DOLLARS here, unlike Gametime's cents — 188 is $188.00, and
+// 188 + 33.84 = 225.34 confirms it. Getting that backwards in either direction
+// is a hundredfold error that still looks like a plausible ticket price.
+//
+// No seat numbers: AXS publishes section and row only.
+
+// The onsale token identifies the event across all three payloads and appears
+// in the page url too, which is what lets the popup find these seats without
+// seeing a payload. Mirrors getAxsEventId() in axs-adapter.js: the leading run
+// before the first percent-escape.
+function axsOnsaleToken(url) {
+  try {
+    // Read the RAW query string, not searchParams.
+    //
+    // searchParams.get() percent-DECODES, so "…ACb%2Fv%2F2F%2F%2FwD" comes back
+    // as "…ACb/v/2F//wD": the first "%" no longer exists, the cut never
+    // happens, and stripping the slashes leaves "qyNwCQAAAACR8mTJAAAAACbv2FwD"
+    // — a token the adapter and the popup never produce. The seats would be
+    // stored under a key the dashboard does not look up, which presents as
+    // capturing nothing with no error anywhere.
+    const raw = (String(url).match(/[?&]onsale_?id=([^&#]*)/i) || [])[1] || "";
+    const token = (raw.split("%")[0] || "").replace(/[^A-Za-z0-9_-]/g, "");
+    return token.length >= 12 ? token : "";
+  } catch (e) {
+    return "";
+  }
+}
+
+// allInPrice is what the buyer pays; `price` is the base. Same call as every
+// other marketplace here, and FEE_MULTIPLIER_BY_SITE stays 1.0 because the fee
+// is already inside the figure.
+function axsPrice(listing) {
+  const breakdown = listing && listing.priceBreakdown;
+  const candidates = [
+    listing && listing.allInPrice,
+    breakdown && breakdown.total,
+    listing && listing.price,
+  ];
+  for (const c of candidates) {
+    const n = typeof c === "string" ? parseFloat(c) : c;
+    if (typeof n === "number" && isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function axsSectionName(listing) {
+  const section = (listing && listing.section) || {};
+  return String(section.name || section.longSectionName || "");
+}
+
+// The section as a buyer refers to it: "330", not "Upper Level 330".
+//
+// AXS names sections with their level, and the level is already carried by the
+// Area column ("Upper Level", or "Upper Level - Endzone" once mapinfo is in),
+// so keeping it here reads as "Block Upper Level 330 - Upper Level" on the
+// dashboard and pads every CSV row. Stadium section numbers do not repeat
+// across levels — 100s lower, 200s club, 300s upper — so the number alone is
+// unambiguous.
+//
+// A section with no trailing number ("Penthouse", "(Block)") keeps its name;
+// there is nothing to shorten it to.
+function axsBlockName(listing) {
+  const full = axsSectionName(listing);
+  const tail = full.match(/([0-9]{1,4}[A-Za-z]?)\s*$/);
+  return tail ? tail[1] : full;
+}
+
+function axsIsParking(listing) {
+  return /\bparking\b|\blot\s*[0-9]+\b/i.test(axsSectionName(listing));
+}
+
+// What a buyer would want to see before committing.
+function axsAttributes(listing) {
+  const out = [];
+  if (Array.isArray(listing.seatFeatures)) {
+    for (const f of listing.seatFeatures) if (f) out.push(String(f));
+  }
+  if (Array.isArray(listing.tags)) {
+    for (const t of listing.tags) if (t) out.push(String(t));
+  }
+  if (Array.isArray(listing.premiumPerks)) {
+    for (const perk of listing.premiumPerks) if (perk) out.push(String(perk));
+  }
+  const stock = String(listing.stockType || "").trim();
+  if (stock) out.push(stock);
+  // A zone listing is not a specific seat in that section, which matters to
+  // anyone reading a row number next to it.
+  if (listing.isZoneSeating === true) out.push("Zone seating");
+  return out;
+}
+
+// token -> { groupId -> group name }, from /axsmarketplace/mapinfo.
+const axsGroupNames = {};
+// token -> { name, venue }, from /veritix/start-flow.
+const axsEvents = {};
+
+function axsIndexMap(token, body) {
+  if (!token) return;
+  const groups = Array.isArray(body.groups) ? body.groups : [];
+  const names = axsGroupNames[token] || (axsGroupNames[token] = {});
+  let added = 0;
+  for (const g of groups) {
+    if (!g || g.id == null || !g.name) continue;
+    names[String(g.id)] = String(g.name);
+    added++;
+  }
+  if (added) bgLog(`[background] AXS: indexed ${added} seating group(s) for the Area column`);
+}
+
+// GET /axsmarketplace/eventinfo?onsaleID=<token> — 448 bytes, and the only
+// payload carrying a DATE:
+//
+//   { id: 6491101, name: "Denver Broncos at Kansas City Chiefs (…)",
+//     utcDate: "2026-09-15T00:15:00", localDate: "2026-09-14T19:15:00",
+//     venueName: "Arrowhead Stadium", venueAddress: { … } }
+//
+// localDate is the venue's own clock, which is what a buyer reads on the
+// ticket; utcDate is the fallback. Note they differ by a calendar day here —
+// a 19:15 kickoff local is 00:15 the next day UTC — so choosing the wrong one
+// mislabels the event by a day rather than by hours.
+function axsIndexEventInfo(token, body) {
+  if (!token || !body) return;
+  const name = body.name ? String(body.name) : null;
+  const venue = body.venueName ? String(body.venueName) : null;
+  const date = isoToDisplayDate(body.localDate || body.utcDate);
+  if (!name && !venue && !date) return;
+  axsEvents[token] = {
+    name: name || (axsEvents[token] && axsEvents[token].name) || null,
+    venue: venue || (axsEvents[token] && axsEvents[token].venue) || null,
+    date: date || (axsEvents[token] && axsEvents[token].date) || null,
+  };
+  bgLog(`[background] AXS: event info — name=${name || "?"} date=${date || "?"} venue=${venue || "?"}`);
+}
+
+// The start-flow payload is the session/config response — NOT the inventory,
+// which is what it was mistaken for until the offers endpoint was found. It
+// does carry the event name and venue, and the ticket flow's own page publishes
+// neither (its JSON-LD reads as "FanSight"), so it is the only source for them.
+function axsIndexEvent(token, body) {
+  if (!token) return;
+  const onsale = body.onsaleInformation || {};
+  const venues = Array.isArray(onsale.venues) ? onsale.venues : [];
+  const groups = Array.isArray(onsale.groups) ? onsale.groups : [];
+  const products = groups.length && Array.isArray(groups[0].products) ? groups[0].products : [];
+  const name = products.length && products[0].description ? String(products[0].description) : null;
+  const venue = venues.length && venues[0].name ? String(venues[0].name) : null;
+  if (!name && !venue) return;
+  const prev = axsEvents[token] || {};
+  // eventinfo is the better source and may already have run; never drop its
+  // date just because this payload has none.
+  axsEvents[token] = {
+    name: name || prev.name || null,
+    venue: venue || prev.venue || null,
+    date: prev.date || null,
+  };
+  bgLog(`[background] AXS: event identity — name=${name || "?"} venue=${venue || "?"}`);
+}
+
+async function saveAxsSeats(eventId, body, tabId, site, eventInfo) {
+  if (!body || !Array.isArray(body.listings)) return;
+
+  const gameKey = `${site}:${eventId}`;
+  const data = await getStorage();
+  const games = data.games || {};
+  if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  // JSON-LD first, but on tix.axs.com it reads the shell app and returns
+  // "FanSight", so start-flow is what actually names this event.
+  const indexed = axsEvents[eventId] || {};
+  const name = (eventInfo && eventInfo.name && !/^fansight$/i.test(eventInfo.name)
+    ? eventInfo.name : null) || indexed.name;
+
+  if (name) {
+    const prev = games[gameKey].match || {};
+    games[gameKey].match = {
+      name,
+      date: (eventInfo && eventInfo.date) || indexed.date || prev.date || null,
+      venue: (eventInfo && eventInfo.venue) || indexed.venue || prev.venue || null,
+      currency: "USD",
+      performanceId: eventId,
+    };
+  }
+
+  const venueName = games[gameKey].match && games[gameKey].match.venue;
+  logTierMapping(venueName);
+
+  const groupNames = axsGroupNames[eventId] || {};
+  const seats = {};
+  let parking = 0;
+  let missingPrice = 0;
+
+  try {
+    for (const listing of body.listings) {
+      if (!listing) continue;
+      if (axsIsParking(listing)) { parking++; continue; }
+
+      const dollars = axsPrice(listing);
+      if (dollars == null) { missingPrice++; continue; }
+      // Stored in thousandths to match centsToUSD() in the popup.
+      const price = Math.round(dollars * 1000);
+
+      const fullSection = axsSectionName(listing);
+      const block = axsBlockName(listing);
+      const row = String(listing.row != null ? listing.row : "");
+      // mapinfo names the group ("Upper Level - Endzone"). When it has not
+      // arrived, the section's own prefix carries most of the same meaning:
+      // "Upper Level 330" -> "Upper Level". Taken from the FULL name, not from
+      // `block`, which is just "330" now and has no prefix left to take.
+      const area = groupNames[String(listing.groupId)]
+        || fullSection.replace(/\s*[0-9]+[A-Za-z]?\s*$/, "").trim();
+      // `splits` is the list of purchasable lot sizes, not a count — reading it
+      // would turn a 10-seat listing selling in 1..10 into nine phantom seats.
+      const qty = Number(listing.quantity) || 1;
+      const attributes = axsAttributes(listing);
+      const listingId = String(listing.id || `${block}-${row}`);
+      const accessible = /\b(ada|accessible|wheelchair)\b/i
+        .test(fullSection + " " + attributes.join(" "));
+
+      // AXS publishes no seat numbers, only section and row, so a listing of N
+      // becomes N seats with an empty seat field — as TickPick and Vivid do.
+      for (let i = 0; i < qty; i++) {
+        seats[`${listingId}-${i}`] = {
+          block,
+          row,
+          seat: "",
+          area,
+          category: "resale",
+          tier: VenueTiers.tierFor(venueName, block, row),
+          price,
+          exclusive: true,
+          site: "axs",
+          accessible,
+          attributes,
+        };
+      }
+    }
+  } catch (error) {
+    bgLog("[background] Error parsing AXS listings:", error.message);
+  }
+
+  const total = Object.keys(seats).length;
+  bgLog(`[background] AXS: ${total} seats from ${body.listings.length} listings` +
+    (parking ? `, ${parking} parking excluded` : "") +
+    (missingPrice ? `, ${missingPrice} had no price` : "") +
+    (Object.keys(groupNames).length ? "" : ", mapinfo not seen yet — Area from section names"));
+
+  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].site = site;
+  games[gameKey].lastScanned = Date.now();
+
+  if (tabId) tabGameMap[tabId] = gameKey;
+  await chrome.storage.local.set({ games });
+}
+
 // ─── Gametime ─────────────────────────────────────────────────────────────
 // GET mobile.gametime.co/v3/listings/<eventId>?all_in_pricing=true&quantity=N
 //
@@ -2443,9 +2751,13 @@ function gametimeDisclosures(listing) {
 const gametimeEvents = {};
 
 // event-info.js normalises dates to "DD-MM-YYYY - HH:MM" for the popup, and it
-// is a page-context script the service worker cannot import. Reimplemented to
-// the same contract; event-info-check.js asserts the shared format.
-function gametimeEventDate(iso) {
+// is a page-context script the service worker cannot import. Reimplemented here
+// to the same contract; event-info-check.js asserts the shared format.
+//
+// Shared rather than per-site: Gametime's datetime_local and AXS's localDate
+// are the same ISO shape, and a second copy would be a second thing to get
+// wrong.
+function isoToDisplayDate(iso) {
   if (typeof iso !== "string") return null;
   const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/);
   if (!m) return null;
@@ -2463,7 +2775,7 @@ function gametimeIndexEvents(body) {
       name: ev.name ? String(ev.name) : null,
       // datetime_local is the venue's own clock, which is what a buyer reads
       // on the ticket; datetime_utc is the fallback.
-      date: gametimeEventDate(ev.datetime_local || ev.datetime_utc),
+      date: isoToDisplayDate(ev.datetime_local || ev.datetime_utc),
       venue,
     };
     added++;

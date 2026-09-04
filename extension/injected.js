@@ -127,7 +127,14 @@
               // AXS stays flagged unconfirmed below, so the candidate ranking
               // keeps listing everything the page fetched even now that this
               // matches — narrowing here cannot hide a wrong guess.
-              ? ["/veritix/"]
+              // Confirmed on the Broncos-at-Chiefs onsale: the inventory is
+              // /axsmarketplace/offers — 1250KB, 1797 listings. "/veritix/"
+              // was captured for a long time on the belief that start-flow was
+              // the largest JSON the page fetched; it is 34KB of session and
+              // config, and no seat ever came from it. It stays matched
+              // because it is the only source for the event name and venue.
+              ? ["/axsmarketplace/offers", "/axsmarketplace/mapinfo",
+                 "/axsmarketplace/eventinfo", "/veritix/start-flow/"]
               : ["/seatmap/", "/performance/"];
 
   // Defense-in-depth: prevent duplicate scans at the page level.
@@ -317,10 +324,29 @@
   //
   // Set to a short site tag ("EV", "SH", "SG", …) to hunt a new site's
   // inventory endpoint; null once that site is parsed.
-  // Both Vivid Seats and Gametime are parsed now. Set this to a short site tag
-  // ("EV", "SH", "SG", …) to map the next source; package-check.js blocks a
-  // release while it is non-null.
+  // AXS is parsed now (offers + mapinfo + eventinfo, captured passively), so
+  // nothing is in bring-up. Set this to a short site tag ("EV", "SH", "SG", …)
+  // to map the next source; package-check.js blocks a release while it is
+  // non-null.
   const DISCOVERY_SITE = null;
+
+  // Whether the probe is on, said out loud at load.
+  //
+  // BUILD_STAMP only changes when tools/package.py runs, so on an UNPACKED
+  // build it is identical before and after an edit and cannot tell you whether
+  // chrome://extensions was reloaded. That cost a round trip on AXS: a capture
+  // came back with no probe output at all and the stamp matched either way.
+  //
+  // This must stay BELOW the declaration above. The first version of it was a
+  // function called from the site if/else chain 250 lines earlier, which reads
+  // `DISCOVERY_SITE` inside its temporal dead zone and threw on load for every
+  // AXS page — the same failure mode as the isTicketmasterAM regression, and
+  // caught by the same suite.
+  console.log(DISCOVERY_SITE
+    ? `[FIFA Ticket Scout] discovery probe ARMED for "${DISCOVERY_SITE}" — ` +
+      `every response will be dumped as [${DISCOVERY_SITE}-PROBE]`
+    : "[FIFA Ticket Scout] discovery probe is DISARMED — if you expected probe " +
+      "output, this is not the build you edited; reload at chrome://extensions");
   const PROBE_MIN_CHARS = 2000;
   // Small JSON bodies are printed in full up to this size while a site is
   // being mapped. Above it, only the url is named.

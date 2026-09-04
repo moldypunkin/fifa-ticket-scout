@@ -228,9 +228,15 @@ function loadData() {
     // tix.axs.com where the path is an opaque blob. Mirrors getAxsEventId() in
     // axs-adapter.js — `e` needs 6+ digits there for the same reason.
     const isAxsSite = /axs\.com/.test(url);
+    // Mirrors getAxsEventId() in axs-adapter.js. The last branch is the ticket
+    // flow on tix.axs.com, whose url carries no numeric id at all — only an
+    // opaque token in the first path segment, taken up to the first
+    // percent-escape. Without it the popup derives no key and cannot show the
+    // seats even once a parser stores them.
     const axsEventMatch = isAxsSite && (url.match(/\/events?\/(\d{4,})/i)
       || url.match(/[?&]eventId=(\d{4,})/i)
-      || url.match(/[?&]e=(\d{6,})/i));
+      || url.match(/[?&]e=(\d{6,})/i)
+      || url.match(/^https?:\/\/[^/]*tix\.axs\.com\/([A-Za-z0-9_-]{12,})/i));
     const axsEventId = axsEventMatch ? axsEventMatch[1] : null;
     const isAxsEvent = !!axsEventId;
 

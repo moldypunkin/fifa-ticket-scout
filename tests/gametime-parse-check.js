@@ -17,7 +17,10 @@ const fn = (name) => eval("(" + extractFn(bg, name) + ")");
 const gametimePrice = fn("gametimePrice");
 const gametimeIsParking = fn("gametimeIsParking");
 const gametimeDisclosures = fn("gametimeDisclosures");
-const gametimeEventDate = fn("gametimeEventDate");
+// Renamed to isoToDisplayDate when AXS needed the same conversion — its
+// localDate is the same ISO shape as Gametime's datetime_local, and a second
+// copy would be a second thing to get wrong.
+const gametimeEventDate = fn("isoToDisplayDate");
 
 // ── the captured row ───────────────────────────────────────────────────────
 const LISTING = {

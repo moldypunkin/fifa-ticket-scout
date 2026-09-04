@@ -46,9 +46,29 @@
       const short = qs.get("e");
       if (short && /^\d{6,}$/.test(short)) return short;
 
-      // Trailing numeric segment, last resort.
+      // Trailing numeric segment.
       const tail = path.match(/\/(\d{5,})\/?$/);
       if (tail) return tail[1];
+
+      // Last resort: the opaque token the ticket flow puts in the first path
+      // segment. Observed live as
+      //   tix.axs.com/qyNwCQAAAACR8mTJAAAAACb%2Fv%2F2F%2F%2FwD%2F...
+      // with no `e` parameter anywhere, so every check above returned null and
+      // the scan had no key to store under.
+      //
+      // The same token prefixes the API path the page then calls
+      //   /veritix/start-flow/v1/qyNwCQAAAACR8mTJAAAAACb%2Fv%2F...
+      // which is why the leading run before the first percent-escape is what is
+      // taken: it is the part that appears in both, and it is what the popup
+      // can derive from the tab url without seeing any payload.
+      //
+      // UNVERIFIED across reloads. If this blob encodes session state rather
+      // than the event, the key will change every visit and seats will scatter
+      // across storage — the id is logged on every load so a second capture
+      // settles it.
+      const first = path.replace(/^\//, "").split("/")[0] || "";
+      const token = (first.split("%")[0] || "").replace(/[^A-Za-z0-9_-]/g, "");
+      if (token.length >= 12) return token;
 
       return null;
     } catch (e) {
