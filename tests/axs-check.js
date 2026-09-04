@@ -1,7 +1,12 @@
-// AXS plumbing and event identity. There is no parser yet — that is the point
-// of this file existing now: AXS is wired through every other layer and has
-// been since it was added, so it LOOKS finished. background.js has no
-// saveAxsSeats and never has, and nothing asserted that either way.
+// AXS plumbing and event identity. The listing parser is axs-parse-check.js
+// and the save path is axs-e2e-check.js.
+//
+// Written while AXS had no parser at all: it was wired through every other
+// layer — adapter, permissions, brand, labels, fee entry, capture pattern — so
+// every surface said "supported" while background.js had no saveAxsSeats and
+// never had. Nothing asserted either half, so nothing noticed. The pairing
+// below is what this file is really for: what the popup CLAIMS and what the
+// service worker can actually do must not drift apart.
 const fs = require("fs");
 const EXT = require("./ext-dir");
 const extractFn = require("./extract-fn");

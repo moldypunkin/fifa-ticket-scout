@@ -4,6 +4,73 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## September 4, 2026 — v2.8.0
+
+### AXS: Actually Parsed
+
+AXS has been wired through every layer since it was added — adapter, host permissions, content scripts, brand, labels, CSV filename tag, fee entry, capture pattern — and listed in `PASSIVE_SITE_LABELS`, so the empty state told people "the tickets will be captured automatically". `background.js` had no `saveAxsSeats` and never had. Nothing was ever stored from AXS, and every surface said otherwise.
+
+**The capture pointed at the wrong endpoint.** v2.6.2 recorded `/veritix/start-flow` as "the largest JSON the ticket page fetches (611KB)". It is 34KB of session and config. The inventory is `unifiedapicommerce-us.axs.com/axsmarketplace/offers` — 1250KB, 1797 listings — and no seat was ever going to come from start-flow. Four payloads are captured now, each doing one job:
+
+| endpoint | carries |
+|---|---|
+| `/axsmarketplace/offers` | the inventory |
+| `/axsmarketplace/mapinfo` | group and section names, for the Area column |
+| `/axsmarketplace/eventinfo` | name, date, venue |
+| `/veritix/start-flow` | name and venue, as a fallback |
+
+Prices are **dollars** here, where Gametime's are cents. Each site's unit is now pinned by a test rather than inferred, because getting it backwards in either direction is a hundredfold error that still reads as a plausible ticket price.
+
+`priceBreakdown` does not enumerate the whole fee: `price + serviceFee` falls short of `total` by exactly 3.50 on every sampled listing. Some flat per-ticket component is not broken out, so the all-in figure is read from `total`, never computed from the parts.
+
+Dates come from `eventinfo.localDate`, not `utcDate`. On the mapped event those fall on different calendar days — a 19:15 kickoff local is 00:15 the next day UTC — so the wrong choice mislabels an event by a day rather than by hours. `gametimeEventDate` became the shared `isoToDisplayDate`, since AXS's `localDate` is the same ISO shape as Gametime's `datetime_local`.
+
+### AXS: Identity Where There Is No Id
+
+The live ticket flow's url carries no numeric id at all, only an opaque token:
+
+```
+tix.axs.com/qyNwCQAAAACR8mTJAAAAACb%2Fv%2F2F%2F%2FwD...
+```
+
+Every existing branch returned null, the console said "No event ID resolved", and a scan had no key to store under — a parser alone would not have been enough. The token is taken as the leading run before the first percent-escape, which is also what prefixes the `/veritix/` api path and the `onsaleID` on every marketplace call.
+
+Reading it back in the service worker needed the RAW query string. `searchParams.get()` percent-decodes, so `…ACb%2Fv%2F2F` came back as `…ACb/v/2F`, the cut never happened, and stripping the slashes produced a token neither the adapter nor the popup ever generates. Seats would have been stored under a key the dashboard does not look up — which presents as capturing nothing, with no error anywhere.
+
+**Unverified:** whether the token is stable across visits. If it encodes session state rather than the event, a later visit gets a fresh key and seats scatter across storage.
+
+### Curated Venue Tiers Were Silently Missing
+
+Not AXS-specific, though AXS is where it showed. The curated maps are keyed by the bare number a venue prints on a ticket — `330` — while marketplaces prefix the level: AXS ships `Upper Level 330`, Vivid Seats ships `Section 208`. The exact lookup missed every one, and the miss was invisible: the venue itself resolved, so the dashboard reported "149 mapped sections" for Arrowhead Stadium while every seat fell through to the section-text heuristic.
+
+`tierFor()` now tries the trailing number after the full name. `Upper Level 330` went from `Upper (300s)` to `Cat M - Upper Corner`. The full name is tried first, so a venue whose map genuinely keys the long form still wins; lettered sections keep their letter, so `330A` and `330` are not merged.
+
+Worth re-checking any site where tiers looked wrong — every source that decorates the section name was hitting this.
+
+### AXS: Section Numbers Only
+
+The dashboard read `Block Upper Level 330 · Upper Level` — the level twice, because it is already the Area column. The block is now the section number alone. Stadium section numbers do not repeat across levels, so the number is unambiguous, and it is exactly what the curated tier maps are keyed by. Sections with no number keep their name.
+
+### The Probe Says Whether It Is Armed
+
+`BUILD_STAMP` only changes when `tools/package.py` runs, so on an unpacked build it is identical before and after an edit and cannot tell you whether `chrome://extensions` was reloaded — despite a comment claiming a mismatch means it was not. A capture came back with no probe output at all and the stamp matched either way. Every load now states it:
+
+```
+[FIFA Ticket Scout] discovery probe ARMED for "AXS" — every response will be dumped as [AXS-PROBE]
+[FIFA Ticket Scout] discovery probe is DISARMED — if you expected probe output,
+                    this is not the build you edited; reload at chrome://extensions
+```
+
+The first version of that line was a function called from the site if/else chain, which reads `DISCOVERY_SITE` inside its temporal dead zone and threw on load for every AXS page. `injected-load-check.js` caught it — the same failure mode as the `isTicketmasterAM` regression, and the reason that suite exists.
+
+### Tests
+
+33 suites, up from 29. New: `axs-check`, `axs-parse-check`, `axs-e2e-check`, `tier-section-check`.
+
+`tm-account-manager-check` was asserting that no OTHER site had the discovery probe armed. That is a fact about whichever site is in bring-up, not about Account Manager, and `package-check.js` already fails the build while any probe is armed — so mapping a new source broke an unrelated suite for a reason it could not explain. Scoped back to AM.
+
+---
+
 ## September 3, 2026 — v2.7.0
 
 ### Marketplace Adapters: Vivid Seats and Gametime
