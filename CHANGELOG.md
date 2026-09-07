@@ -4,6 +4,34 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## September 7, 2026 — v2.8.1
+
+### Venue Categories: 22 Venues to 27
+
+Imported the Ticket Board export. **1,584 sections to 3,995**, across nine new venues — Acrisure Arena, Memorial Stadium, Moody Center ATX, Nebraska Memorial Stadium, Nissan Stadium (and its Nashville variant), SNHU Arena, T-Mobile Center, Tiger Stadium — with every existing venue growing: Arrowhead 149 to 317, Empower Field 247 to 329, Saban Field 147 to 208.
+
+`venue_categories.json` is fetched from `main` hourly, so this reaches every install without a store release. `extension/venue-tiers.js` is regenerated alongside it as the shipped fallback for fresh installs; the two are one build and must be committed together.
+
+`tools/venue_categories.csv` is now in the repo. It was not before, and neither was `tools/venue_tiers_export.json` — so nothing in the checkout could reproduce the published mapping, and a rebuild from a partial CSV would have replaced all 22 venues with whatever that file happened to contain. The source is tracked now.
+
+### The Build Refuses To Merge A Venue With Its Own Alias
+
+The export listed both a venue and its alias: `bryant-denny stadium` alongside `saban field at bryant-denny stadium`, and `geha field at arrowhead stadium` alongside `arrowhead stadium`. `canonical()` folds an alias onto its target, so both entries landed on one key and the uncurated copy merged into the curated one.
+
+That cost 102 curated categories at Saban Field — `Cat A - West Side Center 3` became `Lower (100s)` — and left 23 Arrowhead sections holding two conflicting catch-all rules apiece, where which category wins is whichever the loop reached first.
+
+The Arrowhead half was caught by the tier suite's "no section has more than one catch-all rule". **The Saban Field overwrite was caught by nothing** — it was found by diffing old against new by hand, and would otherwise have published to every install within the hour.
+
+The build now detects two different CSV names resolving to one key, keeps the entry named like the key, and drops the alias-named duplicate with a message saying so. The dropped rows are redundant by construction: `tiers.js` resolves that name through the same alias at lookup time, so nothing becomes unreachable. Verified — `Bryant-Denny Stadium`, `GEHA Field at Arrowhead Stadium`, `tiger stadium - baton rouge`, and the three city-suffixed variants all still resolve to their canonical maps.
+
+Grouping for that check is by the RAW venue name. The first attempt grouped by `canonical()`, which already applies the alias and therefore collapsed exactly the two entries it was meant to tell apart — the guard ran and reported nothing.
+
+### Renamed Venues
+
+The export renames `tiger stadium - baton rouge` to plain `tiger stadium` and drops three city-suffixed duplicates (`lane stadium blacksburg, va`, `neyland stadium knoxville, tn`, `bridgeforth stadium harrisonburg, va`). All four still resolve: `venueKey()` strips trailing comma fragments, and its base-name step handles the ` - <disambiguator>` form in both directions. Tiger Stadium went from 119 sections to 385 under the shorter name.
+
+---
+
 ## September 4, 2026 — v2.8.0
 
 ### AXS: Actually Parsed

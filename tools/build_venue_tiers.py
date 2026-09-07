@@ -510,9 +510,43 @@ def build():
                   % (name, len(hits), ", ".join(sorted(hits))))
         return key
 
+    # Two DIFFERENT csv venue names can resolve to one key, because an alias
+    # folds them together: "bryant-denny stadium" is an alias of "saban field at
+    # bryant-denny stadium", and "geha field at arrowhead stadium" of "arrowhead
+    # stadium". A portal export that lists both then merges an uncurated copy
+    # into a curated one — silently. On a real export that overwrote 102 curated
+    # categories at Saban Field with generic ones, and left 23 Arrowhead
+    # sections holding two conflicting catch-all rules apiece.
+    #
+    # The entry NAMED like the key wins; the alias-named duplicate is dropped
+    # with a message. It is redundant by construction — tiers.js resolves that
+    # name through the same alias at lookup time, so nothing becomes
+    # unreachable.
+    by_key = {}
+    for r in categories:
+        # Grouped by the RAW name: canonical() already applies the alias, so
+        # grouping on it collapses exactly the two entries this is meant to
+        # tell apart.
+        by_key.setdefault(resolve_csv_venue(r["venue"]), {})               .setdefault(" ".join(str(r["venue"]).split()).lower(), []).append(r)
+
+    dropped_alias_rows = set()
+    for key, groups in by_key.items():
+        if len(groups) < 2:
+            continue
+        keep = key if key in groups else max(groups, key=lambda g: len(groups[g]))
+        for name, rows in groups.items():
+            if name == keep:
+                continue
+            dropped_alias_rows.update(id(r) for r in rows)
+            print("warning: %r is an alias of %r and both are in the CSV - "
+                  "dropping the %d %r row(s) so they cannot overwrite the "
+                  "curated mapping" % (name, keep, len(rows), name))
+
     csv_sections = {}
     csv_sorts = {}
     for r in categories:
+        if id(r) in dropped_alias_rows:
+            continue
         key = resolve_csv_venue(r["venue"])
         if r["section"]:
             csv_sections.setdefault(key, {}).setdefault(r["section"], []).append(
