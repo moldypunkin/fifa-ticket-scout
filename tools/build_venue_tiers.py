@@ -279,6 +279,25 @@ def read_categories_csv(path):
         rows.append({"venue": venue, "section": section, "row_from": row_from,
                      "row_to": row_to, "tier": tier, "sort": sort, "line": lineno})
 
+    # Collapse rows that are IDENTICAL in every field but the line number.
+    #
+    # The Ticket Board export of 2026-09-14 repeated one line verbatim
+    # ("arrowhead stadium,ADA 328,,,Upper (300s),") and validation below refused
+    # the whole 5,053-row file over it, as two catch-alls for one section. Two
+    # identical rows are not a conflict — they say the same thing twice — so
+    # keep the first. Rows that DISAGREE (same section, different tier) are
+    # left alone and still refused, because there the choice of which one wins
+    # is genuinely ambiguous.
+    seen, unique = set(), []
+    for r in rows:
+        key = (r["venue"].lower(), r["section"], r["row_from"], r["row_to"],
+               r["tier"], r["sort"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(r)
+    rows = unique
+
     problems.extend(validate_category_rows(rows))
     return rows, problems
 

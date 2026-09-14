@@ -4,6 +4,22 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## September 14, 2026 — v2.8.2
+
+### Venue Categories: 3,995 Sections to 4,707
+
+Imported the Ticket Board export of 2026-09-14. Still 27 venues; every change is additive — no venue lost a section, no curated category was downgraded, and no existing section changed category. Largest gains: Notre Dame Stadium 163 to 328, Texas Memorial Stadium 264 to 365, Bobby Dodd Stadium (Atlanta) 51 to 123, Moody Center 57 to 112.
+
+The export again listed `bryant-denny stadium` and `geha field at arrowhead stadium` beside the venues they alias; the v2.8.1 guard dropped them, and Saban Field and Arrowhead kept their curated categories.
+
+`bobby dodd stadium` was absent from this export (only the Atlanta-suffixed entry was present). `--import` merges rather than replaces, so its existing rows remain. If the portal removed it deliberately, it has to be removed from `tools/venue_categories.csv` by hand.
+
+### The Importer Collapses Identical Duplicate Rows
+
+The export repeated one line verbatim — `arrowhead stadium,ADA 328,,,Upper (300s),` — and the importer refused all 5,053 rows over it as two catch-all rules for one section. Identical rows are not a conflict, so they are now collapsed to the first. Rows for the same section with DIFFERENT tiers are still refused, since there the winner would be arbitrary; that case was re-checked after the change.
+
+---
+
 ## September 7, 2026 — v2.8.1
 
 ### Venue Categories: 22 Venues to 27
