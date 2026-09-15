@@ -190,6 +190,7 @@ out("--- each MAIN-world adapter, on its own site ---");
     ["axs-adapter.js", "https://www.axs.com/events/123456/chiefs"],
     ["vividseats-adapter.js", "https://www.vividseats.com/nfl/chiefs-tickets/production/5432109"],
     ["gametime-adapter.js", "https://gametime.co/nfl-football/chiefs-tickets/9-14-2026-denver/events/6512ab34cd56ef7890123456"],
+    ["gotickets-adapter.js", "https://gotickets.com/tickets/1984079/trans-siberian-orchestra-tickets/t-mobile-center-kansas-city-mo-12-29-2026?orderBy=Price%3A+Low+to+High&quantity=2"],
   ];
   for (const pair of ADAPTERS) {
     const file = pair[0], href = pair[1];

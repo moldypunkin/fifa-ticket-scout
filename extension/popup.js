@@ -171,6 +171,7 @@ function siteFromUrl(url) {
     if (h.includes("tickpick")) return "tickpick";
     if (h.includes("vividseats")) return "vividseats";
     if (h.includes("gametime")) return "gametime";
+    if (h.includes("gotickets")) return "gotickets";
     if (h.includes("axs")) return "axs";
     if (h.includes("-shop-")) return "lms";
     if (h.includes("-resale-")) return "resale";
@@ -253,6 +254,16 @@ function loadData() {
     const gtEventId = gtEventMatch ? gtEventMatch[1] : null;
     const isGametimeEvent = !!gtEventId;
 
+    // GoTickets: the numeric id straight after /tickets/, e.g.
+    //   /tickets/1984079/trans-siberian-orchestra-tickets/…-12-29-2026
+    // Mirrors getGoTicketsEventId() in gotickets-adapter.js; the two must stay
+    // in step or the adapter captures a page the popup cannot show.
+    const isGoTicketsSite = /gotickets\.com/.test(url);
+    const gotEventMatch = isGoTicketsSite && (url.match(/\/tickets\/(\d{4,})(?:[/?#]|$)/i)
+      || url.match(/[?&](?:eventId|event_id|productionId)=(\d{4,})/i));
+    const gotEventId = gotEventMatch ? gotEventMatch[1] : null;
+    const isGoTicketsEvent = !!gotEventId;
+
     const isVividSeatsSite = /vividseats\.com/.test(url);
     const vsEventMatch = isVividSeatsSite && (url.match(/\/production[s]?\/(\d+)/i)
       || url.match(/[?&]productionId=(\d+)/i)
@@ -275,6 +286,7 @@ function loadData() {
         : isAxsEvent ? "axs"
         : isVividSeatsEvent ? "vividseats"
         : isGametimeEvent ? "gametime"
+        : isGoTicketsEvent ? "gotickets"
         : null,
       // No site is in bring-up right now. A site belongs here rather than in
       // `passive` while it is recognised but has no parser, so the empty state
@@ -330,6 +342,9 @@ function loadData() {
       } else if (gtEventId) {
         const gtKey = `gametime:${gtEventId}`;
         if (games[gtKey]) activeKey = gtKey;
+      } else if (gotEventId) {
+        const gotKey = `gotickets:${gotEventId}`;
+        if (games[gotKey]) activeKey = gotKey;
       } else if (tabPerfId) {
         const preferred = `${tabSite}:${tabPerfId}`;
         const other = `${tabSite === "lms" ? "resale" : "lms"}:${tabPerfId}`;
@@ -582,7 +597,7 @@ let currentSite = "resale";
 // again changes this one line.
 const CONFIG_REPO = "https://raw.githubusercontent.com/moldypunkin/fifa-ticket-scout/main";
 
-const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", tickpick: "TickPick", axs: "AXS", vividseats: "Vivid Seats", gametime: "Gametime", resale: "Resale" };
+const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", tickpick: "TickPick", axs: "AXS", vividseats: "Vivid Seats", gametime: "Gametime", gotickets: "GoTickets", resale: "Resale" };
 
 // The header follows the active site. `lms` and `resale` are both FIFA
 // properties, so they keep the original name.
@@ -601,6 +616,7 @@ const SITE_FILE_TAGS = {
   axs: "axs",
   vividseats: "vividseats",
   gametime: "gametime",
+  gotickets: "gotickets",
 };
 
 function siteFileTag(site) {
@@ -627,6 +643,7 @@ const PASSIVE_SITE_LABELS = {
   axs: "AXS",
   vividseats: "Vivid Seats",
   gametime: "Gametime",
+  gotickets: "GoTickets",
 };
 
 const SITE_BRANDS = {
@@ -640,6 +657,7 @@ const SITE_BRANDS = {
   axs: "AXS Scout",
   vividseats: "Vivid Seats Scout",
   gametime: "Gametime Scout",
+  gotickets: "GoTickets Scout",
 };
 
 function setBrand(site) {
@@ -1658,7 +1676,7 @@ function compareVersions(a, b) {
 // tickpick stores `p`, the per-ticket price the listing quotes. TickPick
 // advertises all-in pricing so 1.0 is expected to be right, but that has not
 // been checked against a checkout page.
-const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0 };
+const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0, gotickets: 1.0 };
 
 // Flat per-ticket fee, added after the multiplier. Percentage fees alone could
 // not describe Evenue: its price-level table quotes a base price and the site

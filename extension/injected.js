@@ -9,7 +9,7 @@
   // Three debugging rounds in this project were spent on results produced by a
   // build that had not been reloaded, which is indistinguishable from a change
   // that did not work. Compare this against what package.py prints.
-  const BUILD_STAMP = "f4965ad4";
+  const BUILD_STAMP = "157f86c8";
   
   // Detect which ticketing site we're on
   const isTicketmaster = window.location.hostname.includes('ticketmaster.com');
@@ -31,6 +31,7 @@
   const isAxs = window.location.hostname.includes('axs.com');
   const isVividSeats = window.location.hostname.includes('vividseats.com');
   const isGametime = window.location.hostname.includes('gametime.co');
+  const isGoTickets = window.location.hostname.includes('gotickets.com');
 
   if (isTicketmaster) {
     console.log("[FIFA Ticket Scout] Running on Ticketmaster (will use adapter) build " + BUILD_STAMP);
@@ -50,6 +51,8 @@
     console.log("[FIFA Ticket Scout] Running on Vivid Seats (passive capture) build " + BUILD_STAMP);
   } else if (isGametime) {
     console.log("[FIFA Ticket Scout] Running on Gametime (passive capture) build " + BUILD_STAMP);
+  } else if (isGoTickets) {
+    console.log("[FIFA Ticket Scout] Running on GoTickets (passive capture) build " + BUILD_STAMP);
   } else {
     console.log("[FIFA Ticket Scout] Unknown ticketing site - no action");
     return;
@@ -86,7 +89,18 @@
           ? ["/pac-api/"]
           : isTickPick
             ? ["/listings/internal/event-v2/"]
-            : isGametime
+            : isGoTickets
+              // Confirmed on event 1984079 (Trans-Siberian Orchestra, T-Mobile
+              // Center): /rest/events/<id>/listings, 46KB, 57 listings plus the
+              // event and the venue's section groups. The attribute-name table
+              // is a separate small request. "/listings" alone would not match
+              // "/rest/listing-attributes", hence both.
+              //
+              // The page also calls /rest/events/issue-challenge — a bot-
+              // detection proof-of-work. Capture stays passive for that reason:
+              // re-issuing requests would mean solving it.
+              ? ["/listings", "/rest/listing-attributes"]
+              : isGametime
               // Two payloads, both needed. Confirmed on event
               // 68af55be0dcf1d7f796e5e89 (Rays at Rangers, Globe Life Field):
               //
@@ -324,10 +338,9 @@
   //
   // Set to a short site tag ("EV", "SH", "SG", …) to hunt a new site's
   // inventory endpoint; null once that site is parsed.
-  // AXS is parsed now (offers + mapinfo + eventinfo, captured passively), so
-  // nothing is in bring-up. Set this to a short site tag ("EV", "SH", "SG", …)
-  // to map the next source; package-check.js blocks a release while it is
-  // non-null.
+  // GoTickets is parsed now (/rest/events/<id>/listings, captured passively),
+  // so nothing is in bring-up. Set this to a short site tag ("EV", "SH", …) to
+  // map the next source; package-check.js blocks a release while non-null.
   const DISCOVERY_SITE = null;
 
   // Whether the probe is on, said out loud at load.
@@ -821,6 +834,7 @@
         : isTickPick ? window.__tickpickAdapter
         : isAxs ? window.__axsAdapter
         : isGametime ? window.__gametimeAdapter
+        : isGoTickets ? window.__goticketsAdapter
         : isVividSeats ? window.__vividseatsAdapter
         : null;
       return adapter ? adapter.getEventInfo() : undefined;
@@ -1516,7 +1530,7 @@
   //      chatty enough to blow out the buffer in seconds.
   //   2. Guard re-entrancy. Our postMessage is observed by the listener below,
   //      and anything that logs while handling a message would loop forever.
-  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[FIFA]", "[TM]", "[SG]", "[SH]", "[EV]", "[TP]", "[AXS]", "[TP-PROBE]", "[EV-PROBE]", "[SH-PROBE]", "[SG-PROBE]", "[TM-PROBE]", "[AXS-PROBE]"];
+  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[FIFA]", "[TM]", "[SG]", "[SH]", "[EV]", "[TP]", "[AXS]", "[TP-PROBE]", "[EV-PROBE]", "[SH-PROBE]", "[SG-PROBE]", "[TM-PROBE]", "[AXS-PROBE]", "[GOT]", "[GOT-PROBE]"];
   const originalLog = console.log;
   let relayingLog = false;
   console.log = function (...args) {
@@ -1543,6 +1557,42 @@
     }
   };
 
+  // GoTickets listings request body, summarised for the log.
+  //
+  // The live request is a POST whose body the first version could not see: the
+  // page passes a Request object, so `init.body` is empty and the payload sits
+  // in the Request's stream. That body almost certainly carries whatever limits
+  // the response — the event reports 2,554 tickets available and the response
+  // held 244, with the page's own quantity selector making no difference.
+  //
+  // Filters are short scalars (quantity, sort, page size), so those are shown.
+  // Any string longer than 40 characters is replaced by its length: the same
+  // body may carry the proof-of-work answer to /rest/events/issue-challenge,
+  // and these lines reach Download logs.
+  function describeGoTicketsBody(text) {
+    if (typeof text !== "string" || !text) return "none";
+    let parsed;
+    try { parsed = JSON.parse(text); } catch (e) {
+      return text.length <= 200 ? text : "<" + text.length + " chars, not JSON>";
+    }
+    const walk = (v, depth) => {
+      if (v === null || typeof v === "number" || typeof v === "boolean") return v;
+      if (typeof v === "string") return v.length > 40 ? "<string, " + v.length + " chars>" : v;
+      if (Array.isArray(v)) {
+        return depth > 2 ? "<array, " + v.length + " items>"
+          : v.slice(0, 10).map((x) => walk(x, depth + 1));
+      }
+      if (typeof v === "object") {
+        if (depth > 2) return "<object, " + Object.keys(v).length + " keys>";
+        const o = {};
+        Object.keys(v).forEach((k) => { o[k] = walk(v[k], depth + 1); });
+        return o;
+      }
+      return String(v);
+    };
+    return JSON.stringify(walk(parsed, 0)).slice(0, 600);
+  }
+
   // Patch fetch
   const originalFetch = window.fetch;
   window.fetch = async function (...args) {
@@ -1553,6 +1603,40 @@
     if (willCapture) {
       const init = args[1] || {};
       rememberRequest(toAbsoluteUrl(url), init.method || "GET", init.body);
+    }
+
+    // GoTickets: how does the page ask for one quantity? The listings request
+    // carries no query string, yet every listing in the response sells in
+    // pairs — so the filter travels some other way, or there is no filter at
+    // all. Say what the request actually carries. Header NAMES only: values
+    // can hold session or bot-challenge tokens, and these lines reach logs.
+    if (isGoTickets && /\/rest\/events\/\d+\/listings/.test(url)) {
+      try {
+        const init = args[1] || {};
+        const req = typeof args[0] === "object" ? args[0] : null;
+        const method = init.method || (req && req.method) || "GET";
+        const h = init.headers || (req && req.headers) || {};
+        const names = typeof h.keys === "function" ? Array.from(h.keys())
+          : Array.isArray(h) ? h.map((p) => p[0]) : Object.keys(h);
+        const where = `[GOT] listings request (fetch): ${method} ${toAbsoluteUrl(url)} | ` +
+          `headers: ${names.join(",") || "none"} | body: `;
+        if (typeof init.body === "string") {
+          console.log(where + describeGoTicketsBody(init.body));
+        } else if (init.body) {
+          console.log(where + "(" + Object.prototype.toString.call(init.body) + ")");
+        } else if (req && typeof req.clone === "function") {
+          // Cloned synchronously, BEFORE the page's own fetch reads the
+          // stream: a Request body can be read once, and reading the original
+          // here would break the page's request.
+          req.clone().text()
+            .then((t) => console.log(where + describeGoTicketsBody(t)))
+            .catch((e) => console.log(where + "(unreadable: " + (e && e.message) + ")"));
+        } else {
+          console.log(where + "none");
+        }
+      } catch (e) {
+        console.log(`[GOT] could not describe the listings request: ${e && e.message}`);
+      }
     }
 
     // Capture headers from any seatmap request the page makes
@@ -1664,6 +1748,20 @@
 
     const xhrWillCapture = !!this._ftsUrl && shouldCapture(this._ftsUrl);
     if (this._ftsUrl) countResponse(xhrWillCapture);
+
+    // GoTickets: the same request description as the fetch hook, for when the
+    // page issues its listings call by XHR instead. Header names only.
+    if (isGoTickets && this._ftsUrl && /\/rest\/events\/\d+\/listings/.test(this._ftsUrl)) {
+      try {
+        const body = typeof args[0] === "string" ? describeGoTicketsBody(args[0])
+          : args[0] ? "(" + Object.prototype.toString.call(args[0]) + ")" : "none";
+        console.log(`[GOT] listings request (xhr): ${this._ftsMethod || "GET"} ` +
+          `${toAbsoluteUrl(this._ftsUrl)} | headers: ` +
+          `${Object.keys(this._ftsHeaders || {}).join(",") || "none"} | body: ${body}`);
+      } catch (e) {
+        console.log(`[GOT] could not describe the listings request: ${e && e.message}`);
+      }
+    }
 
     if (xhrWillCapture) {
       rememberRequest(toAbsoluteUrl(this._ftsUrl), this._ftsMethod, args[0]);

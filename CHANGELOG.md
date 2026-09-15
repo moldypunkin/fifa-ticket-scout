@@ -4,6 +4,47 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## September 15, 2026 — v2.9.0
+
+### Marketplace Adapter: GoTickets
+
+Ten sources now. Passive capture, like every resale site before it.
+
+`GET gotickets.com/rest/events/<eventId>/listings` returns `{ listings, event, venueConfiguration, redirect }` in one response — the inventory, the event, and the venue's section groups together — so the Area column has no dependency on a second request. A small separate request, `/rest/listing-attributes`, maps attribute ids to names ("Obstructed View", "Wheelchair Accessible").
+
+Read off event 1984079 (Trans-Siberian Orchestra, T-Mobile Center): 58 listings, 244 seats.
+
+- **Price is `allInPrice`, in dollars.** Base price, service fee and the $6 delivery charge added up to the total on two sampled listings and came to $3 more than it on the third, so the total is read, never rebuilt from the parts.
+- **Quantity is `quantity`.** `validSplitQuantities` is the list of purchasable lot sizes; a six-seat listing that sells in 1, 2, 3, 4 or 6 is six seats, not five.
+- **The block is the section number** — `Lower 101` becomes `101`, which is what the curated tier maps key on. The level is the Area column, resolved from `venueConfiguration.sections[].groupId` to the group's name.
+- **The date is `eventTimeLocal`.** The event object's field names were not visible in the first capture, so the parser logged its key list and the real name came from that. Local time wins over `eventTimeUtc`, which is the next calendar day for an evening show.
+- **No seat numbers are published.** Some rows are ranges — `Row 1-16` — which is the seller's listing, passed through unchanged. At T-Mobile Center every section is mapped as a whole, so a range gets the same curated tier as an exact row.
+
+The event id is the number straight after `/tickets/` in the page url. The slug carries a date (`12-29-2026`) and the url carries `quantity=2`; neither is mistaken for the id.
+
+The log tag is `GOT` because `GT` was already Gametime's.
+
+### GoTickets: 244 of 2,554 Tickets, and Why That Is the Ceiling
+
+The event object reports `availableTickets: 2554`. The response lists 244. Two rounds went into finding out why, and the answer is that the scout already has everything the page has:
+
+1. The page's own quantity selector makes no difference — switching the page to `quantity=1` returned the same 58 listings.
+2. The listings request is a `POST` whose body carries exactly one field, `botDetectionToken`: an 884-character answer to `/rest/events/issue-challenge`. There is no page, page size, quantity, price range or section list in it.
+
+So there is no filter to remove and no second page to request. Retrieving more would mean producing GoTickets' bot-detection answers, which is precisely what that token exists to prevent; the scout does not do that, for the same reason capture is passive on every other site. The 2,554 figure is an event-level count GoTickets reports but does not render as listings.
+
+The request logging that established this reads header NAMES only, never values, and replaces any body string longer than 40 characters with its length. The body is read from a clone of the page's Request object: a Request body is a one-shot stream, and reading the original would have broken the page's own listings call. `tests/gotickets-request-check.js` executes the real hook and asserts all three.
+
+The first body log printed `body: none` because the page passes a `Request` object rather than `init.body`. The first inventory-count line printed nothing at all when the count was unusable, which could not distinguish a stale build from an empty field; it now always prints, with the raw value.
+
+### Tests
+
+37 suites, up from 33. New: `gotickets-check`, `gotickets-parse-check`, `gotickets-e2e-check`, `gotickets-request-check`.
+
+`axs-parse-check` failed on the GoTickets work: it guards against summing AXS fee parts by searching all of `background.js` for the text `serviceFee +`, and a GoTickets comment explaining why those parts are not summed contained exactly that. The comment was reworded; the guard was left as strict as it was.
+
+---
+
 ## September 14, 2026 — v2.8.2
 
 ### Venue Categories: 3,995 Sections to 4,707

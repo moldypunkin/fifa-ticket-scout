@@ -148,6 +148,7 @@ function siteFromUrl(url) {
     if (h.includes("tickpick")) return "tickpick";
     if (h.includes("vividseats")) return "vividseats";
     if (h.includes("gametime")) return "gametime";
+    if (h.includes("gotickets")) return "gotickets";
     if (h.includes("axs")) return "axs";
     if (h.includes("-resale-")) return "resale";
     if (h.includes("-shop-"))   return "lms";
@@ -838,6 +839,33 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
       await saveAxsSeats(eventId, body, tabId, site, eventInfo);
     } else {
       bgLog("[background] AXS: no onsale token in " + url.split("?")[0]);
+    }
+  }
+
+  // GoTickets. Two payloads, both captured passively:
+  //
+  //   /rest/listing-attributes        id -> name for listing attributes
+  //   /rest/events/<eventId>/listings the inventory, the event, and the venue
+  //                                   groups — everything else in one response
+  //
+  // The attribute table is indexed when it arrives; it came BEFORE the listings
+  // on the observed page, but a missing name only costs the attribute text,
+  // never a seat.
+  if (site === "gotickets" && url.includes("/rest/listing-attributes") &&
+      Array.isArray(body)) {
+    goTicketsIndexAttributes(body);
+  }
+
+  if (site === "gotickets" && body && Array.isArray(body.listings)) {
+    const m = url.match(/\/rest\/events\/(\d+)\/listings/);
+    const eventId = m ? m[1]
+      : String((body.event && body.event.id) || (body.listings[0] || {}).eventId || "");
+    if (m && eventId) {
+      await enforceGameLimit(`${site}:${eventId}`);
+      await saveGoTicketsSeats(eventId, body, tabId, site, eventInfo);
+    } else if (!m) {
+      bgLog("[background] GoTickets: listings array at an unexpected url, not parsed: " +
+        url.split("?")[0]);
     }
   }
 
@@ -2390,6 +2418,268 @@ async function saveVividSeatsSeats(eventId, body, tabId, site, eventInfo) {
     (parking ? `, ${parking} parking excluded` : "") +
     (missingPrice ? `, ${missingPrice} had no price` : "") +
     (globalInfo.ticketCount ? `, page states ${globalInfo.ticketCount}` : ""));
+
+  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].site = site;
+  games[gameKey].lastScanned = Date.now();
+
+  if (tabId) tabGameMap[tabId] = gameKey;
+  await chrome.storage.local.set({ games });
+}
+
+// ─── GoTickets ────────────────────────────────────────────────────────────
+// GET gotickets.com/rest/events/<eventId>/listings
+//
+// Top level: { listings, event, venueConfiguration, redirect }. 57 listings on
+// event 1984079 (Trans-Siberian Orchestra, T-Mobile Center, 12-29-2026). Read
+// off that capture:
+//
+//   id                    7255422774
+//   section               "Lower 101"       level + section, like AXS
+//   sectionId             1891434           -> venueConfiguration.sections[].id
+//   row                   "31"
+//   quantity              2                 seats in the listing
+//   validSplitQuantities  [2] / [1,2,3,4,6] purchasable lot sizes, NOT a count
+//   displayPrice          298               before fees, DOLLARS
+//   serviceFee            29
+//   allInPrice            330               what the buyer pays
+//   deliveryMethods       [{ displayName: "Mobile Transfer", price: 6 }]
+//   attributes            [26]              ids -> /rest/listing-attributes
+//   generalAdmission      false
+//   notes                 "Delivery Delay"
+//
+// Section -> group is resolved inside the same payload
+// (venueConfiguration.sections[].groupId -> venueConfiguration.groups[].name),
+// so the Area column has no ordering dependency on a second request.
+//
+// No seat numbers are published.
+
+// allInPrice, never the parts summed. Base price, service fee and the delivery
+// charge together matched allInPrice on two sampled listings (148/14/6 -> 168,
+// 865/87/6 -> 958) and missed on the third (298/29/6 add to 333, against 330),
+// so the breakdown is not a reliable way to rebuild the total.
+function goTicketsPrice(listing) {
+  const candidates = [listing && listing.allInPrice, listing && listing.displayPrice];
+  for (const c of candidates) {
+    const n = typeof c === "string" ? parseFloat(c) : c;
+    if (typeof n === "number" && isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+// "Lower 101" -> "101". The level is the Area column already, and the curated
+// tier maps are keyed by the bare number. Names without a trailing number
+// ("VIP Packages") are kept whole — there is nothing to shorten them to.
+function goTicketsBlockName(listing) {
+  const full = String((listing && listing.section) || "");
+  const tail = full.match(/([0-9]{1,4}[A-Za-z]?)\s*$/);
+  return tail ? tail[1] : full;
+}
+
+function goTicketsIsParking(listing) {
+  return /\bparking\b|\blot\s*[0-9]+\b/i.test(String((listing && listing.section) || ""));
+}
+
+// id -> name, from /rest/listing-attributes (68 entries: "Mobile Transfer",
+// "Female Ticket", "Wheelchair Accessible", …).
+const goTicketsAttributeNames = {};
+
+function goTicketsIndexAttributes(rows) {
+  let added = 0;
+  for (const r of rows) {
+    if (r && r.id != null && r.name) {
+      goTicketsAttributeNames[String(r.id)] = String(r.name);
+      added++;
+    }
+  }
+  if (added) bgLog(`[background] GoTickets: indexed ${added} listing attribute name(s)`);
+}
+
+function goTicketsAttributes(listing) {
+  const out = [];
+  if (Array.isArray(listing.attributes)) {
+    for (const id of listing.attributes) {
+      if (id == null) continue;
+      // An unindexed id is still worth keeping visible rather than dropping.
+      out.push(goTicketsAttributeNames[String(id)] || ("attribute " + id));
+    }
+  }
+  if (Array.isArray(listing.deliveryMethods)) {
+    for (const d of listing.deliveryMethods) {
+      const name = d && (d.displayName || d.retailDisplayName || d.enumName);
+      if (name) out.push(String(name));
+    }
+  }
+  if (listing.generalAdmission === true) out.push("General admission");
+  const notes = String(listing.notes || "").trim();
+  if (notes) out.push(notes);
+  return out;
+}
+
+// The event object's field names were NOT visible in the capture — the probe
+// only named its eventPerformers array. So this tries the common names and the
+// parser logs the real key list once, which is what to read if the name or
+// date comes back empty.
+function goTicketsEventIdentity(event) {
+  if (!event || typeof event !== "object") return {};
+  const pick = (...keys) => {
+    for (const k of keys) {
+      const v = event[k];
+      if (v != null && v !== "" && typeof v !== "object") return String(v);
+    }
+    return null;
+  };
+  const venueObj = event.venue && typeof event.venue === "object" ? event.venue : null;
+  return {
+    name: pick("name", "title", "eventName", "displayName"),
+    // eventTimeLocal is the real field, from the live event's key list; the
+    // venue clock is what a ticket shows, so it wins over eventTimeUtc, which
+    // can fall on the next calendar day for an evening show.
+    date: isoToDisplayDate(pick("eventTimeLocal", "localDate", "eventDateLocal",
+      "dateLocal", "eventDate", "date", "startDate", "dateTime", "eventTimeUtc")),
+    venue: (venueObj && venueObj.name ? String(venueObj.name) : null) ||
+      pick("venueName", "venue"),
+  };
+}
+
+let goTicketsEventKeysLogged = false;
+
+async function saveGoTicketsSeats(eventId, body, tabId, site, eventInfo) {
+  if (!body || !Array.isArray(body.listings)) return;
+
+  const gameKey = `${site}:${eventId}`;
+  const data = await getStorage();
+  const games = data.games || {};
+  if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  if (body.event && !goTicketsEventKeysLogged) {
+    goTicketsEventKeysLogged = true;
+    bgLog("[background] GoTickets: event keys = " + Object.keys(body.event).join(","));
+  }
+
+  // JSON-LD first, then the payload's own event object.
+  const fromPayload = goTicketsEventIdentity(body.event);
+  const name = (eventInfo && eventInfo.name) || fromPayload.name;
+  if (name) {
+    const prev = games[gameKey].match || {};
+    games[gameKey].match = {
+      name,
+      date: (eventInfo && eventInfo.date) || fromPayload.date || prev.date || null,
+      venue: (eventInfo && eventInfo.venue) || fromPayload.venue || prev.venue || null,
+      currency: "USD",
+      performanceId: eventId,
+    };
+  }
+
+  const venueName = games[gameKey].match && games[gameKey].match.venue;
+  logTierMapping(venueName);
+
+  // sectionId -> group name, from this same payload.
+  const vc = body.venueConfiguration || {};
+  const groupNames = {};
+  for (const g of Array.isArray(vc.groups) ? vc.groups : []) {
+    if (g && g.id != null && g.name) groupNames[String(g.id)] = String(g.name);
+  }
+  const sectionGroup = {};
+  for (const sec of Array.isArray(vc.sections) ? vc.sections : []) {
+    if (sec && sec.id != null && sec.groupId != null) {
+      sectionGroup[String(sec.id)] = groupNames[String(sec.groupId)] || "";
+    }
+  }
+
+  const seats = {};
+  let parking = 0;
+  let missingPrice = 0;
+  // Lot-size diagnostic. The event page url carried quantity=2, but the
+  // listings request did not. If every listing can be bought as a pair, the
+  // response was filtered to that quantity server-side and a sweep is needed;
+  // if some cannot, the response already holds every quantity.
+  let notSoldAsPair = 0;
+  const splitSizes = new Set();
+
+  try {
+    for (const listing of body.listings) {
+      if (!listing) continue;
+      if (goTicketsIsParking(listing)) { parking++; continue; }
+
+      const dollars = goTicketsPrice(listing);
+      if (dollars == null) { missingPrice++; continue; }
+      // Stored in thousandths to match centsToUSD() in the popup.
+      const price = Math.round(dollars * 1000);
+
+      const splits = Array.isArray(listing.validSplitQuantities) ? listing.validSplitQuantities : [];
+      splits.forEach((q) => splitSizes.add(Number(q)));
+      if (splits.length && splits.map(Number).indexOf(2) === -1) notSoldAsPair++;
+
+      const fullSection = String(listing.section || "");
+      const block = goTicketsBlockName(listing);
+      const row = String(listing.row != null ? listing.row : "");
+      const area = sectionGroup[String(listing.sectionId)]
+        || fullSection.replace(/\s*[0-9]+[A-Za-z]?\s*$/, "").trim();
+      // `validSplitQuantities` is the list of purchasable lot sizes; reading it
+      // as a count would turn a 6-seat listing that sells in 1,2,3,4,6 into
+      // five seats.
+      const qty = Number(listing.quantity) || 1;
+      const attributes = goTicketsAttributes(listing);
+      const listingId = String(listing.id != null ? listing.id : `${block}-${row}`);
+      const accessible = /\b(ada|accessible|wheelchair)\b/i
+        .test(fullSection + " " + attributes.join(" "));
+
+      for (let i = 0; i < qty; i++) {
+        seats[`${listingId}-${i}`] = {
+          block,
+          row,
+          seat: "",
+          area,
+          category: "resale",
+          tier: VenueTiers.tierFor(venueName, block, row),
+          price,
+          exclusive: true,
+          site: "gotickets",
+          accessible,
+          attributes,
+        };
+      }
+    }
+  } catch (error) {
+    bgLog("[background] Error parsing GoTickets listings:", error.message);
+  }
+
+  const total = Object.keys(seats).length;
+  bgLog(`[background] GoTickets: ${total} seats from ${body.listings.length} listings` +
+    (parking ? `, ${parking} parking excluded` : "") +
+    (missingPrice ? `, ${missingPrice} had no price` : ""));
+  bgLog(`[background] GoTickets: lot sizes offered = ${[...splitSizes].sort((a, b) => a - b).join(",") || "none"}; ` +
+    `${notSoldAsPair} of ${body.listings.length} listing(s) cannot be bought as a pair` +
+    (notSoldAsPair ? " — so the response is NOT filtered to quantity=2"
+      : " — every listing sells in pairs; the request carries no quantity, so this is seller behaviour, not a filter"));
+
+  // The decisive check. "Every listing sells in pairs" is consistent with a
+  // server-side quantity filter AND with sellers simply avoiding odd lots, so
+  // it cannot settle the question alone. The event object carries its own
+  // availableTickets count; if that is well above what this response holds,
+  // the response is a filtered slice and inventory is missing.
+  //
+  // ALWAYS logged. The first version printed only for a positive count, and a
+  // live load produced no line at all — which could mean a stale build or an
+  // empty field, and silence cannot say which. So the raw value is reported
+  // whatever it is.
+  const inResponse = body.listings.reduce((n, l) => n + (Number(l && l.quantity) || 0), 0);
+  const rawAvailable = body.event ? body.event.availableTickets : undefined;
+  const available = Number(rawAvailable);
+  if (rawAvailable != null && rawAvailable !== "" && isFinite(available) && available > 0) {
+    bgLog(`[background] GoTickets: event reports ${available} ticket(s) available; ` +
+      `this response lists ${inResponse}` +
+      (inResponse >= available ? " — the whole inventory is here"
+        : ` — ${available - inResponse} fewer than the event count. The listings request ` +
+          `carries only a bot-detection token, no filter or page, so compare this with how many ` +
+          `listings the GoTickets page itself shows before treating it as missing inventory`));
+  } else {
+    const pct = body.event ? body.event.percentInventoryAvailable : undefined;
+    bgLog(`[background] GoTickets: availableTickets not usable (raw value: ` +
+      `${JSON.stringify(rawAvailable)}, percentInventoryAvailable: ${JSON.stringify(pct)}); ` +
+      `this response lists ${inResponse} ticket(s) — cannot tell from the event whether it is filtered`);
+  }
 
   games[gameKey].seats = { ...games[gameKey].seats, ...seats };
   games[gameKey].site = site;
