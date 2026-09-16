@@ -906,6 +906,9 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
         catch (e) { return "?"; }
       })();
       bgLog(`[background] AXS: ${path} (${size}) -> ${shape}`);
+      // The shape above stops at eight keys a level, which hid everything
+      // useful in the Veritix payloads. List where the arrays of records are.
+      if (/\/veritix\//.test(path)) axsLogArrays(path, body);
     }
   }
 
@@ -3025,6 +3028,38 @@ function axsAttributes(listing) {
   // anyone reading a row number next to it.
   if (listing.isZoneSeating === true) out.push("Zone seating");
   return out;
+}
+
+// Bring-up for AXS events whose page never calls /axsmarketplace/offers (the
+// Veritix primary flow). Walks a payload and logs every array of objects: its
+// path, length, the first record's keys, and a few inventory-looking values
+// from it (price, section, row, seat, name...), strings capped at 40 chars.
+function axsLogArrays(path, body) {
+  const found = [];
+  const INTERESTING = /price|amount|total|fee|sect|row|seat|name|desc|avail|qty|quant|count|level|zone|area|date|venue|type|code|id$/i;
+  const walk = (v, where, depth) => {
+    if (!v || typeof v !== "object" || depth > 9 || found.length > 400) return;
+    if (Array.isArray(v)) {
+      const first = v.find((x) => x && typeof x === "object" && !Array.isArray(x));
+      if (first) found.push({ where, len: v.length, first });
+      v.slice(0, 3).forEach((x, i) => walk(x, where + "[" + i + "]", depth + 1));
+      return;
+    }
+    for (const k of Object.keys(v)) walk(v[k], where + "." + k, depth + 1);
+  };
+  walk(body, "", 0);
+  const short = path.split("/").slice(-3).join("/").slice(0, 60);
+  bgLog(`[background] AXS arrays in …${short}: ${found.length} found, largest first`);
+  found.sort((a, b) => b.len - a.len).slice(0, 25).forEach((f) => {
+    const keys = Object.keys(f.first);
+    const sample = keys.filter((k) => INTERESTING.test(k)).slice(0, 10).map((k) => {
+      const val = f.first[k];
+      if (val === null || typeof val !== "object") return k + "=" + String(val).slice(0, 40);
+      return k + "=" + (Array.isArray(val) ? "array(" + val.length + ")" : "{…}");
+    });
+    bgLog(`[background] AXS   ${f.where || "(root)"} ×${f.len} keys=${keys.slice(0, 30).join(",")}` +
+      (sample.length ? ` | ${sample.join(" ")}` : ""));
+  });
 }
 
 // token -> { groupId -> group name }, from /axsmarketplace/mapinfo.

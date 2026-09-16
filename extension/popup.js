@@ -241,6 +241,11 @@ function loadData() {
       || url.match(/^https?:\/\/[^/]*tix\.axs\.com\/([A-Za-z0-9_-]{12,})/i));
     const axsEventId = axsEventMatch ? axsEventMatch[1] : null;
     const isAxsEvent = !!axsEventId;
+    // The parser always stores under the onsale token from the offers request,
+    // never under `e`. A tix.axs.com url that carries BOTH (the ?c=axs&e=…
+    // variant) would otherwise be looked up under `e` and never find its seats.
+    const axsTokenMatch = isAxsSite && url.match(/^https?:\/\/[^/]*tix\.axs\.com\/([A-Za-z0-9_-]{12,})/i);
+    const axsTokenId = axsTokenMatch ? axsTokenMatch[1] : null;
 
     // Vivid Seats: a numeric production id, in the path or a query param.
     // Mirrors getVividSeatsEventId() in vividseats-adapter.js; the two must
@@ -350,7 +355,9 @@ function loadData() {
         if (games[tpKey]) activeKey = tpKey;
       } else if (axsEventId) {
         const axsKey = `axs:${axsEventId}`;
-        if (games[axsKey]) activeKey = axsKey;
+        const axsTokenKey = axsTokenId ? `axs:${axsTokenId}` : null;
+        if (axsTokenKey && games[axsTokenKey]) activeKey = axsTokenKey;
+        else if (games[axsKey]) activeKey = axsKey;
       } else if (vsEventId) {
         const vsKey = `vividseats:${vsEventId}`;
         if (games[vsKey]) activeKey = vsKey;

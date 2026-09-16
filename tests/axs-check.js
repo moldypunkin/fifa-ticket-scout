@@ -74,6 +74,18 @@ check("agrees on a browse page",
 check("agrees on the e= flow",
   popupId("https://tix.axs.com/nZA9NwAAAAABIj1H?c=axs&e=92678159754876303")
   === "92678159754876303");
+// The parser keys on the onsale token, never `e`. A url carrying both must
+// still be looked up under the token, or its seats are stored but never shown.
+{
+  const block = popup.match(/const isAxsSite[\s\S]*?const axsTokenId = [^\n]+/);
+  check("popup token block found", !!block);
+  const BOTH = "https://tix.axs.com/nZA9NwAAAACm6CxDAwAAAAAx%2fv%2f%2f%2fwD%2f?c=axs&e=92678159754734056&rt=AfterEvent";
+  const tokenId = block && ((url) => eval(block[0] + ";\naxsTokenId"))(BOTH);
+  const OFFERS = "https://unifiedapicommerce-us.axs.com/axsmarketplace/offers?onsaleID=nZA9NwAAAACm6CxDAwAAAAAx%2Fv%2F%2F%2FwD&flow=best_available";
+  const parserId = eval("(" + extractFn(bg, "axsOnsaleToken") + ")")(OFFERS);
+  check("url with e= and a token: popup token matches the parser key", tokenId === parserId, tokenId + " vs " + parserId);
+  check("the popup tries the token key first", /if \(axsTokenKey && games\[axsTokenKey\]\) activeKey = axsTokenKey;/.test(popup));
+}
 check("the token branch is scoped to tix.axs.com",
   popupId("https://www.axs.com/somethingverylongindeed") === null,
   "a browse url must not yield a token id");

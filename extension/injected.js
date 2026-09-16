@@ -156,7 +156,7 @@
               // config, and no seat ever came from it. It stays matched
               // because it is the only source for the event name and venue.
               ? ["/axsmarketplace/offers", "/axsmarketplace/mapinfo",
-                 "/axsmarketplace/eventinfo", "/veritix/start-flow/"]
+                 "/axsmarketplace/eventinfo", "/veritix/start-flow/", "/veritix/pre-flow/"]
               : ["/seatmap/", "/performance/"];
 
   // Defense-in-depth: prevent duplicate scans at the page level.
