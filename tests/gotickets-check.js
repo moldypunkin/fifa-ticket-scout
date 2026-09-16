@@ -89,7 +89,9 @@ check("the listings url yields the same id", apiId === popupId(LIVE_URL), apiId)
 
 out("");
 out("--- capture ---");
-check("probe disarmed", /const DISCOVERY_SITE = null;/.test(inj));
+// Not "DISCOVERY_SITE is null": another site may be in bring-up, and
+// package-check.js is what blocks a release while any probe is armed.
+check("probe not armed for GoTickets", !/DISCOVERY_SITE = isGoTickets/.test(inj));
 check("the discovery-only capture block is gone", !/if \(isGoTickets\) return false;/.test(inj));
 check("listings endpoint matched", /\["\/listings", "\/rest\/listing-attributes"\]/.test(inj));
 // "/listings" alone would not catch the attribute table.

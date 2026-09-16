@@ -149,6 +149,7 @@ function siteFromUrl(url) {
     if (h.includes("vividseats")) return "vividseats";
     if (h.includes("gametime")) return "gametime";
     if (h.includes("gotickets")) return "gotickets";
+    if (h.includes("ticketsforless")) return "ticketsforless";
     if (h.includes("axs")) return "axs";
     if (h.includes("-resale-")) return "resale";
     if (h.includes("-shop-"))   return "lms";
@@ -839,6 +840,25 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
       await saveAxsSeats(eventId, body, tabId, site, eventInfo);
     } else {
       bgLog("[background] AXS: no onsale token in " + url.split("?")[0]);
+    }
+  }
+
+  // TicketsForLess. One payload, captured passively:
+  //
+  //   GET www.ticketsforless.com/api/tickets/tfl?EventID=<id>
+  //
+  // The id is read off the RAW query string, like AXS's onsale token, so it is
+  // the same number the page url ends in and the popup looks up.
+  if (site === "ticketsforless" && url.includes("/api/tickets/") && body &&
+      Array.isArray(body.tickets)) {
+    const m = String(url).match(/[?&]eventid=(\d+)/i);
+    const eventId = m ? m[1]
+      : String((body.event && (body.event.id || body.event.eventId || body.event.EventID)) || "");
+    if (eventId) {
+      await enforceGameLimit(`${site}:${eventId}`);
+      await saveTicketsForLessSeats(eventId, body, tabId, site, eventInfo);
+    } else {
+      bgLog("[background] TicketsForLess: no EventID in " + url.split("?")[0]);
     }
   }
 
@@ -2418,6 +2438,212 @@ async function saveVividSeatsSeats(eventId, body, tabId, site, eventInfo) {
     (parking ? `, ${parking} parking excluded` : "") +
     (missingPrice ? `, ${missingPrice} had no price` : "") +
     (globalInfo.ticketCount ? `, page states ${globalInfo.ticketCount}` : ""));
+
+  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].site = site;
+  games[gameKey].lastScanned = Date.now();
+
+  if (tabId) tabGameMap[tabId] = gameKey;
+  await chrome.storage.local.set({ games });
+}
+
+// ─── TicketsForLess ───────────────────────────────────────────────────────
+// GET www.ticketsforless.com/api/tickets/tfl?EventID=<id>
+//
+// Top level: { siteConfig, event, cartItems, tickets }. 538 tickets on event
+// 7730195 (Kansas City Chiefs vs Indianapolis Colts, 2026-09-20). A ticket,
+// read off that capture:
+//
+//   id          "4301087"
+//   sec         "334"              already the bare section number
+//   row         "14"
+//   qty         1                  seats in the listing
+//   splits      1 / 23 / 2         a CODE, not a count — a 5-seat listing
+//                                  carried 23
+//   seats       "21" / "15-19" / "29-30"
+//                                  seat NUMBERS, as a single seat or a range
+//   price       98                 dollars
+//   faceValue   87
+//   serviceFee  0
+//   delivery    ["M"]
+//   notes       "Uppers XFER"
+//   mapSection  "334" / "PENTHOUSE"
+//
+// The request carries only EventID — no quantity, page or filter.
+
+// `price`, in dollars. serviceFee was 0 on every sampled ticket while price
+// sat above faceValue (98 against 87), which reads as a price that already
+// includes the markup. That is inferred, not confirmed: the parser logs the
+// siteConfig keys once so a fee setting there can be checked.
+function tflPrice(listing) {
+  const n = typeof listing.price === "string" ? parseFloat(listing.price) : listing.price;
+  return typeof n === "number" && isFinite(n) && n > 0 ? n : null;
+}
+
+function tflIsParking(listing) {
+  return /\bparking\b|\blot\s*[0-9]+\b/i.test(String(listing.sec || "") + " " +
+    String(listing.mapSection || ""));
+}
+
+// "15-19" -> [15..19], "21" -> [21], "1,3,5" -> [1,3,5].
+//
+// Only returned when the seats named match the listing's quantity exactly. A
+// range that disagrees with qty cannot say WHICH seats are for sale, and
+// guessing would print specific seat numbers the seller never offered — so a
+// mismatch yields [] and the seats stay unnumbered.
+function tflSeatNumbers(listing) {
+  const raw = String(listing.seats == null ? "" : listing.seats).trim();
+  const qty = Number(listing.qty) || 0;
+  if (!raw || !qty) return [];
+  const out = [];
+  for (const part of raw.split(",")) {
+    const p = part.trim();
+    if (!p) continue;
+    const range = p.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (range) {
+      const a = Number(range[1]), b = Number(range[2]);
+      if (b < a || b - a > 60) return [];
+      for (let i = a; i <= b; i++) out.push(String(i));
+    } else if (/^\d+$/.test(p)) {
+      out.push(String(Number(p)));
+    } else {
+      return [];
+    }
+  }
+  return out.length === qty ? out : [];
+}
+
+function tflAttributes(listing) {
+  const out = [];
+  const notes = String(listing.notes || "").trim();
+  if (notes) out.push(notes);
+  if (Array.isArray(listing.features)) {
+    for (const f of listing.features) {
+      const name = f && typeof f === "object" ? (f.name || f.title) : f;
+      if (name) out.push(String(name));
+    }
+  }
+  return out;
+}
+
+// The event object's field names were not visible in the capture — only its
+// performers array was sampled — so the common names are tried and the real
+// key list is logged once.
+function tflEventIdentity(event) {
+  if (!event || typeof event !== "object") return {};
+  const pick = (...keys) => {
+    for (const k of keys) {
+      const v = event[k];
+      if (v != null && v !== "" && typeof v !== "object") return String(v);
+    }
+    return null;
+  };
+  const venueObj = event.venue && typeof event.venue === "object" ? event.venue : null;
+  return {
+    name: pick("name", "title", "eventName", "displayName"),
+    date: isoToDisplayDate(pick("dateLocal", "localDate", "eventDateLocal", "date",
+      "eventDate", "startDate", "dateTime", "datetime")),
+    venue: (venueObj && venueObj.name ? String(venueObj.name) : null) ||
+      pick("venueName", "venue"),
+  };
+}
+
+let tflShapeLogged = false;
+
+async function saveTicketsForLessSeats(eventId, body, tabId, site, eventInfo) {
+  if (!body || !Array.isArray(body.tickets)) return;
+
+  const gameKey = `${site}:${eventId}`;
+  const data = await getStorage();
+  const games = data.games || {};
+  if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  if (!tflShapeLogged) {
+    tflShapeLogged = true;
+    bgLog("[background] TicketsForLess: event keys = " +
+      (body.event ? Object.keys(body.event).join(",") : "(no event)") +
+      " | siteConfig keys = " +
+      (body.siteConfig ? Object.keys(body.siteConfig).join(",") : "(no siteConfig)"));
+    // Whether price is what the buyer pays at checkout hangs on these.
+    if (body.siteConfig) {
+      const feeBits = ["noFees", "tax", "deliveryAmount"].map((k) => {
+        let v;
+        try { v = JSON.stringify(body.siteConfig[k]); } catch (e) { v = "?"; }
+        return k + "=" + String(v).slice(0, 200);
+      });
+      bgLog("[background] TicketsForLess: fee settings " + feeBits.join(" | "));
+    }
+  }
+
+  const fromPayload = tflEventIdentity(body.event);
+  const name = (eventInfo && eventInfo.name) || fromPayload.name;
+  if (name) {
+    const prev = games[gameKey].match || {};
+    games[gameKey].match = {
+      name,
+      date: (eventInfo && eventInfo.date) || fromPayload.date || prev.date || null,
+      venue: (eventInfo && eventInfo.venue) || fromPayload.venue || prev.venue || null,
+      currency: "USD",
+      performanceId: eventId,
+    };
+  }
+
+  const venueName = games[gameKey].match && games[gameKey].match.venue;
+  logTierMapping(venueName);
+
+  const seats = {};
+  let parking = 0;
+  let missingPrice = 0;
+  let numbered = 0;
+  let rangeMismatch = 0;
+
+  try {
+    for (const listing of body.tickets) {
+      if (!listing) continue;
+      if (tflIsParking(listing)) { parking++; continue; }
+
+      const dollars = tflPrice(listing);
+      if (dollars == null) { missingPrice++; continue; }
+      // Stored in thousandths to match centsToUSD() in the popup.
+      const price = Math.round(dollars * 1000);
+
+      const block = String(listing.sec || listing.mapSection || "");
+      const row = String(listing.row != null ? listing.row : "");
+      // `splits` is a code, never a count — a five-seat listing carried 23.
+      const qty = Number(listing.qty) || 1;
+      const numbers = tflSeatNumbers(listing);
+      if (numbers.length) numbered++;
+      else if (String(listing.seats || "").trim()) rangeMismatch++;
+      const attributes = tflAttributes(listing);
+      const listingId = String(listing.id != null ? listing.id : `${block}-${row}`);
+      const accessible = /\b(ada|accessible|wheelchair)\b/i.test(block + " " + attributes.join(" "));
+
+      for (let i = 0; i < qty; i++) {
+        seats[`${listingId}-${i}`] = {
+          block,
+          row,
+          seat: numbers[i] != null ? numbers[i] : "",
+          area: "",
+          category: "resale",
+          tier: VenueTiers.tierFor(venueName, block, row),
+          price,
+          exclusive: true,
+          site: "ticketsforless",
+          accessible,
+          attributes,
+        };
+      }
+    }
+  } catch (error) {
+    bgLog("[background] Error parsing TicketsForLess tickets:", error.message);
+  }
+
+  const total = Object.keys(seats).length;
+  bgLog(`[background] TicketsForLess: ${total} seats from ${body.tickets.length} listings, ` +
+    `${numbered} with seat numbers` +
+    (rangeMismatch ? `, ${rangeMismatch} whose seat range did not match the quantity (left unnumbered)` : "") +
+    (parking ? `, ${parking} parking excluded` : "") +
+    (missingPrice ? `, ${missingPrice} had no price` : ""));
 
   games[gameKey].seats = { ...games[gameKey].seats, ...seats };
   games[gameKey].site = site;

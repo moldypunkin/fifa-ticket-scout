@@ -191,6 +191,7 @@ out("--- each MAIN-world adapter, on its own site ---");
     ["vividseats-adapter.js", "https://www.vividseats.com/nfl/chiefs-tickets/production/5432109"],
     ["gametime-adapter.js", "https://gametime.co/nfl-football/chiefs-tickets/9-14-2026-denver/events/6512ab34cd56ef7890123456"],
     ["gotickets-adapter.js", "https://gotickets.com/tickets/1984079/trans-siberian-orchestra-tickets/t-mobile-center-kansas-city-mo-12-29-2026?orderBy=Price%3A+Low+to+High&quantity=2"],
+    ["ticketsforless-adapter.js", "https://www.ticketsforless.com/events/nfl-football-tickets/kansas-city-chiefs-vs-indianapolis-colts-2026-09-20-19-20-00-7730195"],
   ];
   for (const pair of ADAPTERS) {
     const file = pair[0], href = pair[1];

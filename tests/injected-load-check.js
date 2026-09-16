@@ -81,6 +81,7 @@ const SITES = [
   ["Vivid Seats",   "https://www.vividseats.com/kacey-musgraves-tickets-baltimore-cfg-bank-arena-9-5-2026--concerts-country-and-folk/production/6965630", true],
   ["Gametime",      "https://gametime.co/nfl-football/chiefs-at-broncos-tickets/9-14-2026-denver-empower-field/events/6512ab34cd56ef7890123456", true],
   ["GoTickets",     "https://gotickets.com/tickets/1984079/trans-siberian-orchestra-tickets/t-mobile-center-kansas-city-mo-12-29-2026?orderBy=Price%3A+Low+to+High&quantity=2", true],
+  ["TicketsForLess","https://www.ticketsforless.com/events/nfl-football-tickets/kansas-city-chiefs-vs-indianapolis-colts-2026-09-20-19-20-00-7730195", true],
   ["unrelated site","https://example.com/", false],
 ];
 

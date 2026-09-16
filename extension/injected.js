@@ -9,7 +9,7 @@
   // Three debugging rounds in this project were spent on results produced by a
   // build that had not been reloaded, which is indistinguishable from a change
   // that did not work. Compare this against what package.py prints.
-  const BUILD_STAMP = "157f86c8";
+  const BUILD_STAMP = "ad32fa98";
   
   // Detect which ticketing site we're on
   const isTicketmaster = window.location.hostname.includes('ticketmaster.com');
@@ -32,6 +32,7 @@
   const isVividSeats = window.location.hostname.includes('vividseats.com');
   const isGametime = window.location.hostname.includes('gametime.co');
   const isGoTickets = window.location.hostname.includes('gotickets.com');
+  const isTicketsForLess = window.location.hostname.includes('ticketsforless');
 
   if (isTicketmaster) {
     console.log("[FIFA Ticket Scout] Running on Ticketmaster (will use adapter) build " + BUILD_STAMP);
@@ -53,6 +54,8 @@
     console.log("[FIFA Ticket Scout] Running on Gametime (passive capture) build " + BUILD_STAMP);
   } else if (isGoTickets) {
     console.log("[FIFA Ticket Scout] Running on GoTickets (passive capture) build " + BUILD_STAMP);
+  } else if (isTicketsForLess) {
+    console.log("[FIFA Ticket Scout] Running on TicketsForLess (passive capture) build " + BUILD_STAMP);
   } else {
     console.log("[FIFA Ticket Scout] Unknown ticketing site - no action");
     return;
@@ -89,6 +92,11 @@
           ? ["/pac-api/"]
           : isTickPick
             ? ["/listings/internal/event-v2/"]
+            : isTicketsForLess
+              // Confirmed on event 7730195 (Chiefs vs Colts): GET
+              // /api/tickets/tfl?EventID=<id>, 204KB, 538 tickets with seat
+              // numbers. The request carries only the event id — no filter.
+              ? ["/api/tickets/"]
             : isGoTickets
               // Confirmed on event 1984079 (Trans-Siberian Orchestra, T-Mobile
               // Center): /rest/events/<id>/listings, 46KB, 57 listings plus the
@@ -338,9 +346,9 @@
   //
   // Set to a short site tag ("EV", "SH", "SG", …) to hunt a new site's
   // inventory endpoint; null once that site is parsed.
-  // GoTickets is parsed now (/rest/events/<id>/listings, captured passively),
-  // so nothing is in bring-up. Set this to a short site tag ("EV", "SH", …) to
-  // map the next source; package-check.js blocks a release while non-null.
+  // TicketsForLess is parsed now (/api/tickets/tfl, captured passively), so
+  // nothing is in bring-up. Set this to a short site tag to map the next
+  // source; package-check.js blocks a release while it is non-null.
   const DISCOVERY_SITE = null;
 
   // Whether the probe is on, said out loud at load.
@@ -835,6 +843,7 @@
         : isAxs ? window.__axsAdapter
         : isGametime ? window.__gametimeAdapter
         : isGoTickets ? window.__goticketsAdapter
+        : isTicketsForLess ? window.__ticketsforlessAdapter
         : isVividSeats ? window.__vividseatsAdapter
         : null;
       return adapter ? adapter.getEventInfo() : undefined;
@@ -1530,7 +1539,7 @@
   //      chatty enough to blow out the buffer in seconds.
   //   2. Guard re-entrancy. Our postMessage is observed by the listener below,
   //      and anything that logs while handling a message would loop forever.
-  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[FIFA]", "[TM]", "[SG]", "[SH]", "[EV]", "[TP]", "[AXS]", "[TP-PROBE]", "[EV-PROBE]", "[SH-PROBE]", "[SG-PROBE]", "[TM-PROBE]", "[AXS-PROBE]", "[GOT]", "[GOT-PROBE]"];
+  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[FIFA]", "[TM]", "[SG]", "[SH]", "[EV]", "[TP]", "[AXS]", "[TP-PROBE]", "[EV-PROBE]", "[SH-PROBE]", "[SG-PROBE]", "[TM-PROBE]", "[AXS-PROBE]", "[GOT]", "[GOT-PROBE]", "[TFL]", "[TFL-PROBE]"];
   const originalLog = console.log;
   let relayingLog = false;
   console.log = function (...args) {

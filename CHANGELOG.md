@@ -4,6 +4,26 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## September 16, 2026 — v3.0.0
+
+### Marketplace Adapter: TicketsForLess
+
+Eleven sources now. Passive capture, like every resale site before it.
+
+`GET ticketsforless.com/api/tickets/tfl?EventID=<id>` returns `{ siteConfig, event, cartItems, tickets }` in one response. The request carries only the event id — no quantity, page or price filter — so the whole inventory arrives at once.
+
+Read off event 7730195 (Kansas City Chiefs vs. Indianapolis Colts, Arrowhead Stadium): 538 listings, 3,628 seats, all 538 with seat numbers, and 323 curated sections mapped.
+
+- **Price is `price`, in dollars — the listed price, kept as is.** `serviceFee` is 0 on every listing and `siteConfig.noFees` is the "Never Pay Service Fees" badge. Checkout adds sales tax (`siteConfig.tax: true`, rate not published) and a flat `deliveryAmount` of $5 per order; neither is folded into the per-seat price.
+- **Seat numbers are expanded from ranges.** `15-19` on a five-seat listing becomes seats 15, 16, 17, 18 and 19; comma lists work the same way. A range that does not match the quantity, runs backwards, or spans more than 60 seats leaves the seats unnumbered rather than inventing which ones are for sale.
+- **Quantity is `qty`.** `splits` is a code (`23` on a five-seat listing), never a count.
+- **The block is `sec`**, already the bare section number the curated tier maps key on. Parking listings are excluded; seller notes are kept as attributes.
+- **Event identity** comes from the page first, then the payload's `title`, `date` and `venue`. The service worker logs the event and siteConfig key lists and the fee settings once per session.
+
+The event id is the trailing number in the page url's slug. The slug also carries the date and time (`2026-09-20-19-20-00`); none of those parts is mistaken for the id.
+
+---
+
 ## September 15, 2026 — v2.9.0
 
 ### Marketplace Adapter: GoTickets
