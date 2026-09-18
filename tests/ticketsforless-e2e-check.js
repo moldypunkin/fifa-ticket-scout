@@ -101,6 +101,15 @@ ctx.saveTicketsForLessSeats(EVENT_ID, BODY, 1, "ticketsforless", null).then(() =
     s334.tier);
 
   console.log("");
+  console.log("--- the export names the source ---");
+  // The portal maps its source tag off the "# Site:" line in the CSV header,
+  // which reads game.site and falls back to "resale" when it is unset.
+  check("game.site recorded", game.site === "ticketsforless", String(game.site));
+  const popupSrc = fs.readFileSync(EXT + "popup.js", "utf8");
+  check("the export writes it", /# Site: \$\{game\.site \|\| "resale"\}/.test(popupSrc));
+  check("the filename tag is ticketsforless", /ticketsforless: "ticketsforless"/.test(popupSrc));
+
+  console.log("");
   console.log("--- the logs say what happened ---");
   const summary = bgLogs.find((l) => /TicketsForLess: \d+ seats from/.test(l)) || "";
   check("summary line", /12 seats from 5 listings, 3 with seat numbers/.test(summary), summary);
