@@ -4,6 +4,26 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## September 21, 2026 — v3.0.1
+
+### Venue Categories: Ticket Board Export of September 21
+
+Imported 6,300 rows across 47 venues from the Ticket Board export; the store now holds 6,223 rules across 47 venues (75 row bands).
+
+- **New venues:** AT&T Stadium, Kansas Speedway, Sanford Stadium, Memorial Stadium Nebraska, Barclays Center, Xfinity Mobile Arena, Vaught Hemingway Stadium, T-Mobile Arena, Spectrum Center, Pechanga Arena - San Diego, Starlight Theatre - Kansas City, Ryman Auditorium, Arrowhead Stadium parking lots, Honda Center, SoFi Stadium, Marine Stadium, and Los Angeles Convention Center halls 1-3.
+- **Expanded:** Arrowhead Stadium (343 → 405 rows), Saban Field at Bryant-Denny (237 → 287), T-Mobile Center (86 → 112), Morton Amphitheater (51 → 80), Notre Dame Stadium, Darrell K. Royal - Texas Memorial Stadium, Michigan Stadium, Lane Stadium, Neyland Stadium, Memorial Stadium - NE, Empower Field, and Faurot Field.
+- **Alias guard held:** the export's "GEHA Field at Arrowhead Stadium" (26 rows) and "Bryant-Denny Stadium" (154 rows) are aliases of curated venues and were dropped rather than allowed to overwrite them.
+
+### AXS: Ticket-Flow Urls Carrying Both a Token and `e=`
+
+The popup looked these up under the `e=` number while the parser stores AXS seats under the onsale token, so captured seats never showed. The popup now tries the token key first. The service worker also captures `/veritix/pre-flow/` and logs where the arrays of records sit in Veritix payloads — bring-up for AXS events that never call `/axsmarketplace/offers`.
+
+### Export
+
+A test now pins the TicketsForLess export's `# Site: ticketsforless` header line, which the portal maps its source tag from.
+
+---
+
 ## September 16, 2026 — v3.0.0
 
 ### Marketplace Adapter: TicketsForLess
