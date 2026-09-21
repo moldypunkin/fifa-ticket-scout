@@ -4,6 +4,18 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## September 21, 2026 — v3.0.2
+
+### Venue Alias: Empower Field at Mile High
+
+Ticketmaster names the venue "Empower Field At Mile High"; the Ticket Board export files its categories under "Empower Field at Mile High Denver, CO". Venue lookup is by exact normalized name, so Broncos events fell back to the heuristic tiers ("empower field at mile high unmapped") despite 371 curated rows.
+
+Added `"empower field at mile high"` → `"empower field at mile high denver, co"` to the verified aliases in `tools/fifa_venue_aliases.json`, confirmed against a live Ticketmaster event page. Section 110 now resolves to Cat C - Lower Corner, 309 to Cat E - Broncos Center Clubs, 515 to Cat K - Upper Corner.
+
+The alias ships in `venue_categories.json`, so installs pick it up on the hourly refresh once pushed.
+
+---
+
 ## September 21, 2026 — v3.0.1
 
 ### Venue Categories: Ticket Board Export of September 21
