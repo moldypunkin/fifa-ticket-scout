@@ -4,6 +4,22 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## September 24, 2026 — v3.0.3
+
+### Evenue: Schools Whose Price Data Is Server-Rendered
+
+Nebraska (huskers.evenue.net, event F26:06, Memorial Stadium) captured 88,349 seat rows and stored nothing. Its seat rows price the SOLD seats — 31,076 rows, every one AVAILABLE=0 — and leave SLP_PRICE null on all 186 seats actually on sale, while the GraphQL price-level table the parser waits for never arrives on /pac-api/ at all.
+
+The price is in the page, not the traffic: `__NEXT_DATA__ → props.pageProps.component.props.ssrData.discovery_eventDetailMPT[0]` carries PRICE, MIN_PRICE (10200) and MAX_PRICE (10500) — the $102.00 the site quotes. That is the same object Kansas delivers over the network, so injected.js now posts the page's own `ssrData` to the service worker as if it had arrived on /pac-api/, and the existing content-matched `evenueFindEventDetails()` picks it up. Any Paciolan school on this page design benefits, not just Nebraska.
+
+Ruled out along the way, each confirmed against the live page: SEAT_AVAILABILITY (section/row/seat plus a flag, no price), TIERED_FEES (7%, no flat fee), and the venue map's sections.js and metadata.js (geometry only).
+
+**No price is ever copied between seats.** An interim fix that read a price level's price off the sold rows sharing it was cut before release: Nebraska's sold level-1 seats carry $220.00 — a season or plan seat — against the $102.00 the same level quotes on sale, so the figure would have been wrong by more than double. An available seat with no price is dropped, not guessed, and a test pins that.
+
+When a price payload yields no levels, the worker now names the object's fields instead of only its shape. The hunt-by-value bring-up switch (`EVENUE_HUNT_VALUES`) ships empty.
+
+---
+
 ## September 21, 2026 — v3.0.2
 
 ### Venue Alias: Empower Field at Mile High

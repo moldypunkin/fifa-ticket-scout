@@ -9,7 +9,7 @@
   // Three debugging rounds in this project were spent on results produced by a
   // build that had not been reloaded, which is indistinguishable from a change
   // that did not work. Compare this against what package.py prints.
-  const BUILD_STAMP = "76e5b66f";
+  const BUILD_STAMP = "048aa8ce";
   
   // Detect which ticketing site we're on
   const isTicketmaster = window.location.hostname.includes('ticketmaster.com');
@@ -246,8 +246,115 @@
         console.log(`[${SITE_TAG}] matched but nothing was sent — the response was not ` +
           `JSON, so the endpoint pattern is catching the wrong request.`);
       }
+      if (isEvenue) evenueScanPageData();
     }, 12000);
   }
+
+  // ─── Evenue: where does the quoted price come from? ───────────────────────
+  // Nebraska's seat rows carry no price for the seats on sale and no response
+  // the page fetches contains the figure it displays ($102.00 for NS:34 row 48
+  // seat 11), so the price is either embedded in the page's own data or
+  // rendered into the DOM. Look in both. Exposed as window.__fifaEvenueScan()
+  // so it can be re-run after clicking a seat, when the panel is open.
+  function pathLookup(root, keys) {
+    let node = root;
+    for (const k of keys) {
+      if (!node || typeof node !== "object") return null;
+      node = node[k];
+    }
+    return node;
+  }
+
+  function evenueScanPageData() {
+    const WANTED = new Set(["102", "102.00", "102.0", "10200"]);
+    const PRICEY = /price|amount|amt|cost|charge|fee/i;
+    const found = [];
+    const priced = [];
+    const walk = (node, where, depth) => {
+      if (node == null || depth > 8 || found.length > 30) return;
+      if (typeof node === "number" || typeof node === "boolean") {
+        if (WANTED.has(String(node))) found.push(where + "=" + node);
+        return;
+      }
+      if (typeof node === "string") {
+        if (WANTED.has(node.trim())) { found.push(where + '="' + node + '"'); return; }
+        const t = node.trim();
+        if ((t.startsWith("{") || t.startsWith("[")) && t.length < 400000) {
+          try { walk(JSON.parse(t), where + "(json)", depth + 1); } catch (e) { /* not json */ }
+        }
+        return;
+      }
+      if (typeof node !== "object") return;
+      if (Array.isArray(node)) {
+        node.forEach((v, i) => { if (i < 300) walk(v, where + "[" + i + "]", depth + 1); });
+        return;
+      }
+      for (const k of Object.keys(node)) {
+        if (PRICEY.test(k) && priced.length < 25 &&
+            (typeof node[k] === "number" || typeof node[k] === "string") &&
+            String(node[k]).length < 60) {
+          priced.push(where + "." + k + "=" + JSON.stringify(node[k]));
+        }
+        walk(node[k], where + "." + k, depth + 1);
+      }
+    };
+
+    // 1. Data the page ships inside itself (Next.js and friends).
+    let scanned = 0;
+    try {
+      document.querySelectorAll("script[type=\"application/json\"], script#__NEXT_DATA__")
+        .forEach((el, i) => {
+          if (!el.textContent || el.textContent.length > 4000000) return;
+          scanned++;
+          try { walk(JSON.parse(el.textContent), `script[${el.id || i}]`, 0); }
+          catch (e) { /* not json */ }
+        });
+    } catch (e) { /* no DOM access */ }
+    for (const key of ["__NEXT_DATA__", "__INITIAL_STATE__", "__APOLLO_STATE__", "__NUXT__"]) {
+      try { if (window[key]) { scanned++; walk(window[key], "window." + key, 0); } }
+      catch (e) { /* cross-origin or getter throw */ }
+    }
+
+    // 2. What the page is actually showing. Whatever renders "$102.00" has the
+    //    number; its element names say which component to look at next.
+    const shown = [];
+    try {
+      const rx = /\$\s?\d{1,4}(?:[.,]\d{2})?/;
+      document.querySelectorAll("body *").forEach((el) => {
+        if (shown.length >= 8 || el.children.length) return;
+        const t = (el.textContent || "").trim();
+        if (t.length < 40 && rx.test(t)) {
+          shown.push(`${el.tagName.toLowerCase()}${el.className ? "." + String(el.className).split(/\s+/)[0] : ""} "${t}"`);
+        }
+      });
+    } catch (e) { /* no DOM access */ }
+
+    // The event detail object is server-rendered into the page on this build,
+    // so no network capture can ever see it. Hand it to the service worker as
+    // if it had arrived on /pac-api/: evenueFindEventDetails() recognises it by
+    // content (PL_PT_PRICES, or SEASONCD + ITEMCD), whatever it is nested under.
+    try {
+      const ssr = pathLookup(window.__NEXT_DATA__,
+        ["props", "pageProps", "component", "props", "ssrData"]);
+      if (ssr && typeof ssr === "object") {
+        postInventory(window.location.origin + "/pac-api/ssr/__NEXT_DATA__", ssr);
+        console.log(`[EV] sent the page's own ssrData to the service worker: ` +
+          Object.keys(ssr).join(","));
+      }
+    } catch (e) {
+      console.log("[EV] could not read the page's ssrData: " + (e && e.message));
+    }
+
+    console.log(`[EV] page-data scan: ${scanned} embedded blob(s) searched`);
+    if (found.length) console.log(`[EV] page data FOUND 102: ${found.slice(0, 15).join(" ")}`);
+    if (priced.length) console.log(`[EV] page data price fields: ${priced.slice(0, 20).join(" ")}`);
+    if (shown.length) console.log(`[EV] prices rendered on screen: ${shown.join(" | ")}`);
+    if (!found.length && !priced.length && !shown.length) {
+      console.log(`[EV] no price found in page data or on screen — click a seat, then ` +
+        `run __fifaEvenueScan() in this console`);
+    }
+  }
+  try { window.__fifaEvenueScan = evenueScanPageData; } catch (e) { /* frozen window */ }
 
   // ─── Candidate endpoints ─────────────────────────────────────────────────
   // When MATCH_PATTERNS catches nothing, the useful question is "then what DID

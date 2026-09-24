@@ -973,6 +973,11 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
       bgLog(`[background] Evenue: ignoring ${path} -> ${shape} ` +
         `(not the seat array; repeats of this shape stay quiet)`);
     }
+    // OUTSIDE the shape dedupe above: the response carrying the price may
+    // repeat a shape already reported, and skipping it is how it stayed
+    // invisible for a round. Both of these dedupe on their own findings.
+    evenueLogPriceCandidates(path, body);
+    evenueHuntValue(path, body);
   }
 
   // StubHub: report what every captured response actually holds.
@@ -1823,6 +1828,113 @@ function evenueEventIdFromDetail(detail) {
 // name containing "FEE" rather than on a path.
 const evenueFeeSeen = new Set();
 
+// Every price-looking field in a payload, once per path+field. Strings that
+// hold JSON are parsed and walked too: Paciolan ships TIERED_FEES and
+// SEAT_AVAILABILITY as encoded strings, so a plain walk reports "string" and
+// stops exactly where the interesting numbers are.
+// Values to hunt for by VALUE rather than by field name, for when a price
+// arrives under a name nothing would guess. Empty in a release: set it to what
+// the site quotes for a seat while bringing a school up. This is how Nebraska's
+// $102.00 was chased through the network traffic before it turned out to be
+// server-rendered into the page instead (see evenueScanPageData in injected.js).
+const EVENUE_HUNT_VALUES = [];
+const evenueHuntSeen = new Set();
+
+function evenueHuntValue(path, body) {
+  if (!EVENUE_HUNT_VALUES.length) return;
+  const wanted = new Set(EVENUE_HUNT_VALUES.map(String));
+  const hits = [];
+  const walk = (node, where, depth) => {
+    if (node == null || depth > 9 || hits.length > 40) return;
+    if (typeof node === "number" || typeof node === "boolean") {
+      if (wanted.has(String(node))) hits.push(where + "=" + node);
+      return;
+    }
+    if (typeof node === "string") {
+      if (wanted.has(node.trim())) { hits.push(where + '="' + node + '"'); return; }
+      const t = node.trim();
+      if ((t.startsWith("{") || t.startsWith("[")) && t.length < 400000) {
+        try { walk(JSON.parse(t), where + "(json)", depth + 1); } catch (e) { /* not json */ }
+      }
+      return;
+    }
+    if (typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      node.forEach((v, i) => { if (i < 400) walk(v, where + "[" + i + "]", depth + 1); });
+      return;
+    }
+    for (const k of Object.keys(node)) walk(node[k], where + "." + k, depth + 1);
+  };
+  walk(body, "", 0);
+  if (!hits.length) return;
+  const key = path + "|" + hits.join(",").slice(0, 300);
+  if (evenueHuntSeen.has(key)) return;
+  evenueHuntSeen.add(key);
+  bgLog(`[background] Evenue FOUND ${EVENUE_HUNT_VALUES.join("/")} in ` +
+    `${path.split("/").slice(-2).join("/")}: ${hits.slice(0, 20).join(" ")}`);
+}
+
+const evenuePriceSeen = new Set();
+
+function evenueLogPriceCandidates(path, body) {
+  const PRICEY = /price|amount|amt|cost|total|charge|value|fee/i;
+  const hits = [];
+  const walk = (node, where, depth) => {
+    if (node == null || depth > 8 || hits.length > 60) return;
+    if (typeof node === "string") {
+      // Only bother when it plausibly holds structure.
+      const t = node.trim();
+      if ((t.startsWith("{") || t.startsWith("[")) && t.length < 400000) {
+        try { walk(JSON.parse(t), where + "(json)", depth + 1); } catch (e) { /* not json */ }
+      }
+      return;
+    }
+    if (typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      node.slice(0, 3).forEach((v, i) => walk(v, where + "[" + i + "]", depth + 1));
+      return;
+    }
+    for (const k of Object.keys(node)) {
+      const v = node[k];
+      const at = where + "." + k;
+      if (PRICEY.test(k) && (typeof v === "number" || typeof v === "string") &&
+          String(v).length < 80) {
+        hits.push(at + "=" + JSON.stringify(v));
+      }
+      walk(v, at, depth + 1);
+    }
+  };
+  walk(body, "", 0);
+  // Long text fields are where Paciolan hides structure that is not JSON
+  // (SEAT_AVAILABILITY). Print the head of each one once so its encoding is
+  // readable; a price per seat would show up here.
+  const blobs = [];
+  const blobWalk = (node, where, depth) => {
+    if (node == null || depth > 6 || blobs.length > 6) return;
+    if (typeof node === "string") {
+      if (node.length > 200) blobs.push(where + " (" + node.length + " chars): " +
+        node.slice(0, 220).replace(/\s+/g, " "));
+      return;
+    }
+    if (typeof node !== "object") return;
+    if (Array.isArray(node)) { node.slice(0, 2).forEach((v, i) => blobWalk(v, where + "[" + i + "]", depth + 1)); return; }
+    for (const k of Object.keys(node)) blobWalk(node[k], where + "." + k, depth + 1);
+  };
+  blobWalk(body, "", 0);
+  blobs.forEach((b) => {
+    const bk = path + "|blob|" + b.slice(0, 80);
+    if (evenuePriceSeen.has(bk)) return;
+    evenuePriceSeen.add(bk);
+    bgLog(`[background] Evenue text field ${b}`);
+  });
+  if (!hits.length) return;
+  const key = path + "|" + hits.join(",").slice(0, 300);
+  if (evenuePriceSeen.has(key)) return;
+  evenuePriceSeen.add(key);
+  bgLog(`[background] Evenue price candidates in ${path.split("/").slice(-2).join("/")}: ` +
+    hits.slice(0, 25).join(" "));
+}
+
 function evenueLogFeeTable(node, depth) {
   if (!node || typeof node !== "object" || (depth || 0) > 6) return;
   if (Array.isArray(node)) {
@@ -1863,7 +1975,8 @@ async function saveEvenuePriceLevels(details, tabId, site, eventInfo) {
                         collected, 0);
     if (!collected.size) {
       bgLog(`[background] Evenue: ${eventId} price payload yielded no levels — ` +
-        `shape was ${describeShape(detail.PL_PT_PRICES, 4)}`);
+        `shape was ${describeShape(detail.PL_PT_PRICES, 4)}; the detail object ` +
+        `holds: ${Object.keys(detail).join(",").slice(0, 600)}`);
       continue;
     }
 
@@ -2001,6 +2114,12 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
   let missingPrice = 0;
   let fromPriceLevel = 0;
   const priceLevels = games[gameKey].priceLevels || {};
+  // NOT derived from the sold rows on the same PRICELEVELCD. Nebraska F26:06
+  // prices its sold level-1 seats at $220 while the site quotes $102 for an
+  // available level-1 seat (NS:34 row 48), so SLP_PRICE on a sold row is a
+  // different product — a season or plan price — and copying it across would
+  // put a wrong price in front of a buyer. The single-game price comes from
+  // elsewhere in the GraphQL traffic; evenueLogPriceCandidates hunts for it.
 
   // Sampled only to explain a zero-seat result: the counters say how many rows
   // were dropped but not why, and "every available seat had no price" is a

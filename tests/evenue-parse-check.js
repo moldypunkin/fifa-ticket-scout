@@ -80,6 +80,45 @@ const strs = expand([["KU:101",10,1,"4","O",null,null,1000,1,0]], HEADERS).seats
 eq("numeric row coerced to string", typeof strs.row, "string");
 eq("numeric seat coerced to string", typeof strs.seat, "string");
 
+out("\n--- a sold row's price is not an available seat's price ---");
+// Nebraska F26:06: sold level-1 seats carry SLP_PRICE 22000 ($220) while the
+// site quotes $102 for an available level-1 seat (NS:34 row 48), so the sold
+// row prices a different product - a season or plan seat. Copying it across
+// price levels would put a wrong price in front of a buyer.
+eq("no price is derived from other rows", /evenueDeriveLevelPrices/.test(src), false);
+eq("an available row with no price is dropped, not guessed",
+  expand([["NS:33","55","21","1","u",null,null,null,1,0]], HEADERS).missingPrice, 1);
+eq("and stores no seat", Object.keys(
+  expand([["NS:33","55","21","1","u",null,null,null,1,0]], HEADERS).seats).length, 0);
+// The hunt for the real single-game price.
+eq("price candidates are logged", /function evenueLogPriceCandidates/.test(src), true);
+eq("json-in-a-string is walked", /JSON\.parse\(t\)/.test(src), true);
+
+out("\n--- server-rendered price data (Nebraska) ---");
+// Nebraska renders discovery_eventDetailMPT into the page instead of fetching
+// it, so no network capture can see it: MIN_PRICE=10200 sat in __NEXT_DATA__
+// while every /pac-api/ response was priceless. injected.js posts that object
+// to the worker as if it had arrived on /pac-api/, and the existing
+// evenueFindEventDetails() recognises it by content.
+const injSrc = fs.readFileSync(EXT + "injected.js", "utf8");
+eq("the page's ssrData is posted",
+  /postInventory\([^)]*\/pac-api\/ssr\/__NEXT_DATA__[^)]*, ssr\)/.test(injSrc), true);
+eq("read from the Next.js props path",
+  /\["props", "pageProps", "component", "props", "ssrData"\]/.test(injSrc), true);
+// The url must reach the evenue branch in the worker, which keys off /pac-api/.
+eq("the synthetic url routes to evenue", "/pac-api/ssr/__NEXT_DATA__".indexOf("/pac-api/"), 0);
+const findDetails = eval("(" + extractFn(src, "evenueFindEventDetails") + ")");
+const SSR = { discovery_eventDetailMPT: [
+  { SEASONCD: "F26", ITEMCD: "06", PRICE: 0, MIN_PRICE: 10200, MAX_PRICE: 10500 }] };
+eq("the event detail is found in the ssr blob", findDetails(SSR).length, 1);
+const idFromDetail = eval("(" + extractFn(src, "evenueEventIdFromDetail") + ")");
+eq("and yields the page's event id", idFromDetail(findDetails(SSR)[0]), "F26:06");
+// When it carries no level table, the worker names its fields rather than
+// guessing a price from the range.
+eq("unusable price payloads report their fields",
+  /the detail object [\s\S]{0,40}holds/.test(src), true);
+eq("hunt-by-value is off in a release", /const EVENUE_HUNT_VALUES = \[\];/.test(src), true);
+
 out("\n--- wiring ---");
 const inj = fs.readFileSync(EXT + "injected.js", "utf8");
 eq("captures the seat-availability path", /"\/pac-api\/"/.test(inj), true);
