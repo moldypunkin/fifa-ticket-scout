@@ -400,6 +400,7 @@ function loadData() {
 
       currentPerfId = activeKey;
       currentSite = game.site || "resale";
+      currentFees = game.fees && typeof game.fees === "object" ? game.fees : null;
       setBrand(currentSite);
       renderDashboard(game);
     });
@@ -1725,10 +1726,18 @@ const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seat
 // release.
 const FEE_FLAT_BY_SITE = { resale: 0, lms: 0, ticketmaster: 0, seatgeek: 0, stubhub: 0, evenue: 5.00, tickpick: 0, axs: 0 };
 
+// The fee this event publishes, when it publishes one. Evenue's TIERED_FEES
+// differs per school and per event — Colorado F26:F02 charges nothing while
+// Nebraska F26:06 charges 7% — so the event's own table beats the constant
+// above, which stays as the fallback for events that publish none.
+let currentFees = null;
+
 function centsToUSD(cents) {
   const multiplier = FEE_MULTIPLIER_BY_SITE[currentSite] ?? 1.15;
+  const base = cents / 1000;
+  if (currentFees) return base * (1 + (currentFees.pct || 0) / 100) + (currentFees.flat || 0);
   const flat = FEE_FLAT_BY_SITE[currentSite] ?? 0;
-  return cents / 1000 * multiplier + flat;
+  return base * multiplier + flat;
 }
 
 function formatPrice(n) {

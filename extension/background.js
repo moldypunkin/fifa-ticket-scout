@@ -966,6 +966,11 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
     // provisional FEE_FLAT_BY_SITE constant in popup.js can be replaced by the
     // real per-event figure.
     evenueLogFeeTable(body);
+    // Same payload, but kept rather than only printed: the popup needs it to
+    // quote what a buyer pays.
+    const feeRaw = body && body.data && body.data.maps_eventMap
+      ? body.data.maps_eventMap.TIERED_FEES : null;
+    if (feeRaw !== null && feeRaw !== undefined) await evenueRecordFeeRule(tabId, feeRaw);
     const shape = describeShape(body, 5);
     const seen = path + " " + shape;
     if (!evenueIgnoredPaths.has(seen)) {
@@ -1935,6 +1940,59 @@ function evenueLogPriceCandidates(path, body) {
     hits.slice(0, 25).join(" "));
 }
 
+// The per-ticket fee this event actually charges, out of Paciolan's
+// TIERED_FEES. Observed:
+//
+//   Nebraska F26:06  {"tiers":{"0-Infinity":{"feeAmount":0,"feePercentages":[7],
+//                     "facFeeAmt":0,"facFeePct":0,"ticketFeeAmt":0,
+//                     "ticketFeePct":7}},"roundingAmount":100,...}
+//   Colorado F26:F02 {}      - this event charges nothing
+//
+// feePercentages/feeAmount repeat the ticket+facility figures as a total, so
+// only the ticket and facility parts are summed or the fee doubles. Amounts are
+// cents, like every other money field on this platform.
+//
+// One tier is read: "0-Infinity" covers every price at both schools seen so
+// far. A genuinely tiered school would need the seat's price to choose, which
+// the popup does not have when it converts.
+function evenueFeeRule(raw) {
+  let table = raw;
+  if (typeof table === "string") {
+    try { table = JSON.parse(table); } catch (e) { return null; }
+  }
+  if (!table || typeof table !== "object") return null;
+  const tiers = table.tiers && typeof table.tiers === "object" ? table.tiers : null;
+  if (!tiers) return { pct: 0, flat: 0, tiers: 0 };
+  const keys = Object.keys(tiers);
+  if (!keys.length) return { pct: 0, flat: 0, tiers: 0 };
+  const tier = tiers[keys[0]] || {};
+  const num = (v) => (isFinite(Number(v)) ? Number(v) : 0);
+  const pct = num(tier.ticketFeePct) + num(tier.facFeePct);
+  const flatCents = num(tier.ticketFeeAmt) + num(tier.facFeeAmt);
+  return { pct, flat: flatCents / 100, tiers: keys.length };
+}
+
+// tabId -> the fee rule seen on that tab, held because TIERED_FEES arrives in a
+// GraphQL response that names no event.
+const evenuePendingFees = new Map();
+
+async function evenueRecordFeeRule(tabId, raw) {
+  const rule = evenueFeeRule(raw);
+  if (!rule) return;
+  if (tabId != null) evenuePendingFees.set(tabId, rule);
+  const gameKey = tabId != null ? tabGameMap[tabId] : null;
+  if (!gameKey) return;
+  const data = await getStorage();
+  const games = data.games || {};
+  if (!games[gameKey]) return;
+  const prev = games[gameKey].fees || {};
+  if (prev.pct === rule.pct && prev.flat === rule.flat) return;
+  games[gameKey].fees = rule;
+  await chrome.storage.local.set({ games });
+  bgLog(`[background] Evenue: ${gameKey} fee rule ${rule.pct}% + $${rule.flat.toFixed(2)} ` +
+    `per ticket (${rule.tiers} tier(s) published)`);
+}
+
 function evenueLogFeeTable(node, depth) {
   if (!node || typeof node !== "object" || (depth || 0) > 6) return;
   if (Array.isArray(node)) {
@@ -1965,6 +2023,75 @@ const stubhubSeenShapes = new Set();
 // Paths already reported as "not the seat array", so the log names each once.
 const evenueIgnoredPaths = new Set();
 
+// Name, date and venue out of the event detail object. The ticket page itself
+// publishes only the school's internal code — Colorado F26:F02 reads as
+// "TT (FB)" with no date at all — so this object is the better source when it
+// carries one. Field names differ between schools, so the candidates are tried
+// in turn and the whole key list is logged once for whoever meets the next
+// school.
+const evenueDetailKeysLogged = new Set();
+
+function evenueDetailIdentity(detail, eventId, hostName) {
+  if (!detail || typeof detail !== "object") return {};
+  if (!evenueDetailKeysLogged.has(eventId)) {
+    evenueDetailKeysLogged.add(eventId);
+    bgLog(`[background] Evenue: ${eventId} detail fields: ` +
+      Object.keys(detail).join(",").slice(0, 600));
+    // Colorado publishes an empty TIERED_FEES but carries this as well; print it
+    // once so a fee hiding here cannot be missed the way the $5 constant was.
+    // Every field that might name the event, with its value: EVENTNAME on
+    // Colorado reads "Texas Tech (FB)" — the opponent only — so the home team
+    // has to come from one of the others or from the page.
+    const nameBits = ["EVENTNAME", "TITLE", "SSEVENTNAME", "ITEMNAME", "SEASON_NAME",
+      "SEO_MESSAGE", "EVENT_MESSAGE", "TYPE", "FAC_TITLE", "FAC_SSTITLE"]
+      .filter((k) => detail[k] != null && detail[k] !== "" && typeof detail[k] !== "object")
+      .map((k) => `${k}=${JSON.stringify(String(detail[k]).slice(0, 80))}`);
+    if (nameBits.length) {
+      bgLog(`[background] Evenue: ${eventId} name fields: ${nameBits.join(" ")}`);
+    }
+    if (detail.ITEM_FEES !== undefined) {
+      let shown;
+      try { shown = JSON.stringify(detail.ITEM_FEES); } catch (e) { shown = "?"; }
+      bgLog(`[background] Evenue: ${eventId} ITEM_FEES = ${String(shown).slice(0, 400)}`);
+    }
+  }
+  const pick = (...keys) => {
+    for (const k of keys) {
+      const v = detail[k];
+      if (v != null && v !== "" && typeof v !== "object") return String(v).trim();
+    }
+    return null;
+  };
+  // A name that is only a code ("TT (FB)", "F26") is worse than nothing: the
+  // longer description is what a person recognises.
+  // Confirmed against Colorado F26:F02, whose detail object holds EVENTNAME,
+  // TITLE, SSEVENTNAME and ITEMNAME for the name; EVENTDT, EVENTDTFAC and
+  // STARTDT for the date; FAC_TITLE and FAC_SSTITLE for the venue. The older
+  // spellings stay after them for schools on a different build.
+  // SSEVENTNAME is the clean opponent ("Texas Tech"); EVENTNAME carries the
+  // sport code after it ("Texas Tech (FB)"); ITEMNAME is an abbreviation
+  // ("TT (FB)"). Prefer the clean one, then fall back down the list.
+  const opponent = pick("SSEVENTNAME", "EVENTNAME", "EVENT_NAME", "TITLE", "EVENT_TITLE",
+    "NAME", "DESCRIPTION", "EVENT_DESC", "LONG_DESC", "SHORT_DESC", "ITEMNAME");
+  // The payload names only the visiting side, so the host comes from the page.
+  // "University of Colorado vs Texas Tech" beats "Texas Tech (FB)".
+  const host = hostName ? String(hostName).trim() : null;
+  const name = opponent && host && opponent.toLowerCase() !== host.toLowerCase()
+    && opponent.toLowerCase().indexOf(host.toLowerCase()) === -1
+    ? `${host} vs ${opponent}`
+    : opponent;
+  // EVENTDTFAC is the facility's own clock where the two differ, which is what a
+  // ticket shows; EVENTDT is the fallback, then the on-sale start.
+  const rawDate = pick("EVENTDTFAC", "EVENTDT", "EVENT_DATE", "EVENTDATE", "PERF_DATE",
+    "START_DATE", "EVENT_DT", "STARTDT", "PERF_DT", "DATE");
+  return {
+    name: name || null,
+    date: rawDate ? (isoToDisplayDate(rawDate) || rawDate) : null,
+    venue: pick("FAC_TITLE", "FAC_SSTITLE", "VENUE_NAME", "VENUENAME", "FACILITY_NAME",
+      "VENUE") || null,
+  };
+}
+
 async function saveEvenuePriceLevels(details, tabId, site, eventInfo) {
   for (const detail of details) {
     const eventId = evenueEventIdFromDetail(detail);
@@ -1994,6 +2121,20 @@ async function saveEvenuePriceLevels(details, tabId, site, eventInfo) {
     if (!games[gameKey]) games[gameKey] = emptyGame();
     games[gameKey].priceLevels = Object.assign({}, games[gameKey].priceLevels, levels);
     games[gameKey].site = site;
+    // Fill in identity this object knows and the page does not. Never overwrite
+    // a value already stored: the page read wins when it produced something.
+    const ident = evenueDetailIdentity(detail, eventId, eventInfo && eventInfo.host);
+    const prev = games[gameKey].match || {};
+    const pageName = (eventInfo && eventInfo.name) || prev.name || null;
+    // "TT (FB)", "F26" and friends are internal codes, not event names.
+    const isCode = (v) => !v || v.length <= 12 || /^[A-Z0-9 ()._-]+$/.test(v);
+    games[gameKey].match = {
+      name: (isCode(pageName) && ident.name) ? ident.name : (pageName || ident.name),
+      date: (eventInfo && eventInfo.date) || prev.date || ident.date || null,
+      venue: (eventInfo && eventInfo.venue) || prev.venue || ident.venue || null,
+      currency: prev.currency || "USD",
+      performanceId: prev.performanceId || eventId,
+    };
     await chrome.storage.local.set({ games });
 
     const preview = Object.keys(levels).sort().slice(0, 8)
@@ -2250,6 +2391,11 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
   games[gameKey].seats = { ...games[gameKey].seats, ...seats };
   games[gameKey].site = site;
   games[gameKey].lastScanned = Date.now();
+  // The fee table usually arrives before the seats and names no event, so it is
+  // held per tab until there is a game to attach it to.
+  if (tabId != null && evenuePendingFees.has(tabId)) {
+    games[gameKey].fees = evenuePendingFees.get(tabId);
+  }
 
   if (tabId) tabGameMap[tabId] = gameKey;
   await chrome.storage.local.set({ games });

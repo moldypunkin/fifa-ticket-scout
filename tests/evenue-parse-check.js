@@ -119,6 +119,71 @@ eq("unusable price payloads report their fields",
   /the detail object [\s\S]{0,40}holds/.test(src), true);
 eq("hunt-by-value is off in a release", /const EVENUE_HUNT_VALUES = \[\];/.test(src), true);
 
+out("\n--- each event's own fee table (TIERED_FEES) ---");
+// Colorado F26:F02 publishes {} and charges nothing; Nebraska F26:06 publishes
+// 7%. The provisional flat $5 was measured at one school and is wrong for both,
+// so the event's table wins and the constant is only the fallback.
+const feeRule = eval("(" + extractFn(src, "evenueFeeRule") + ")");
+const NEBRASKA = { roundingAmount: 100, tiers: { "0-Infinity": { feeAmount: 0,
+  feePercentages: [7], facFeeAmt: 0, facFeePct: 0, ticketFeeAmt: 0, ticketFeePct: 7 } } };
+eq("Nebraska: 7%, no flat", JSON.stringify(feeRule(NEBRASKA)), '{"pct":7,"flat":0,"tiers":1}');
+eq("Colorado: an empty table means no fee", JSON.stringify(feeRule("{}")),
+  '{"pct":0,"flat":0,"tiers":0}');
+eq("a table arriving as text is parsed", feeRule(JSON.stringify(NEBRASKA)).pct, 7);
+// feePercentages/feeAmount repeat the ticket+facility figures; counting both
+// would double the fee.
+eq("the total fields are not added again", feeRule(NEBRASKA).pct, 7);
+eq("ticket and facility parts are summed",
+  JSON.stringify(feeRule({ tiers: { "0-Infinity": { ticketFeeAmt: 250, facFeeAmt: 100,
+    ticketFeePct: 5, facFeePct: 2 } } })), '{"pct":7,"flat":3.5,"tiers":1}');
+eq("amounts are cents", feeRule({ tiers: { t: { ticketFeeAmt: 250 } } }).flat, 2.5);
+eq("junk yields no rule, so the fallback stands", feeRule("not json"), null);
+eq("no table yields no rule", feeRule(null), null);
+
+// The popup applies it: base x (1 + pct) + flat, ahead of FEE_FLAT_BY_SITE.
+const popupSrc = fs.readFileSync(EXT + "popup.js", "utf8");
+eq("the popup prefers the event's fee rule",
+  /if \(currentFees\) return base \* \(1 \+ \(currentFees\.pct \|\| 0\) \/ 100\) \+ \(currentFees\.flat \|\| 0\);/.test(popupSrc), true);
+eq("and reads it off the active game", /currentFees = game\.fees/.test(popupSrc), true);
+eq("the flat $5 stays as the fallback", /evenue: 5\.00/.test(popupSrc), true);
+// A fee table that arrives before the seats must still reach the game.
+eq("a held rule is attached when seats land", /evenuePendingFees\.get\(tabId\)/.test(src), true);
+
+out("\n--- event identity from the detail object (Colorado) ---");
+// cubuffs.evenue.net publishes only "TT (FB)" and no date on the page itself;
+// the detail object carries the real name, date and venue. Field names taken
+// from the live F26:F02 key list.
+const detailIdentity = eval("(" + extractFn(src, "evenueDetailIdentity") + ")");
+global.isoToDisplayDate = eval("(" + extractFn(src, "isoToDisplayDate").replace(/\?\?/g, "||") + ")");
+global.bgLog = () => {};
+global.evenueDetailKeysLogged = new Set();
+// Exactly as the live F26:F02 payload prints them.
+const CU = { ITEMCD: "F02", SEASONCD: "F26", ITEMNAME: "TT (FB)", SSEVENTNAME: "Texas Tech",
+  EVENTNAME: "Texas Tech (FB)", SEASON_NAME: "2026 Football",
+  EVENTDT: "2026-10-03T19:30:00", EVENTDTFAC: "2026-10-03T17:30:00",
+  FAC_TITLE: "Folsom Field", FAC_SSTITLE: "Folsom Field", ITEM_FEES: null };
+const cu = detailIdentity(CU, "F26:F02", "University of Colorado");
+// The payload names only the visitor; the host comes from the page <title>,
+// "Texas Tech | University of Colorado".
+eq("host and opponent are joined", cu.name, "University of Colorado vs Texas Tech");
+eq("the clean opponent wins over the sport code", detailIdentity(CU, "x", null).name, "Texas Tech");
+eq("no host leaves the name alone", detailIdentity(CU, "y", null).name.indexOf(" vs "), -1);
+eq("a name already naming the host is left alone",
+  detailIdentity({ SSEVENTNAME: "Colorado vs Texas Tech" }, "z", "Colorado").name,
+  "Colorado vs Texas Tech");
+const adapterSrc = fs.readFileSync(EXT + "evenue-adapter.js", "utf8");
+eq("the adapter reads the host off the title", /function getEvenueHostName/.test(adapterSrc), true);
+eq("and ships it with the event info", /info\.host = getEvenueHostName\(\)/.test(adapterSrc), true);
+// EVENTDTFAC is the facility's clock, which is what the ticket shows.
+eq("date comes from EVENTDTFAC", cu.date, "03-10-2026 - 17:30");
+eq("venue comes from FAC_TITLE", cu.venue, "Folsom Field");
+eq("the internal code is not the name", cu.name === CU.ITEMNAME, false);
+eq("no detail is not a crash", JSON.stringify(detailIdentity(null, "x", "Colorado")), "{}");
+// A page name that is a real event name must not be replaced by the payload.
+eq("the code test spots an internal code", /const isCode = /.test(src), true);
+eq("a stored name is kept unless it is a code",
+  /isCode\(pageName\) && ident\.name/.test(src), true);
+
 out("\n--- wiring ---");
 const inj = fs.readFileSync(EXT + "injected.js", "utf8");
 eq("captures the seat-availability path", /"\/pac-api\/"/.test(inj), true);

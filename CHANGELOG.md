@@ -4,6 +4,22 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## September 25, 2026 — v3.0.4
+
+### Evenue: Per-Event Fees, Real Event Names
+
+Colorado (cubuffs.evenue.net, event F26:F02, Folsom Field) captured 4,195 seats priced from all 7 price levels once v3.0.3 read the page's server-rendered price table. Two things were still wrong.
+
+**The fee was a guess, and it was wrong.** The popup added a flat $5.00 to every Evenue ticket — a figure measured once at Virginia Tech and marked provisional. Colorado publishes `TIERED_FEES = {}` and `ITEM_FEES = null`: this event charges nothing, so a $90.00 seat was being shown as $95.00. Nebraska publishes 7% and no flat fee, so it was wrong there too, in the other direction.
+
+The event's own table now wins, parsed from TIERED_FEES and stored on the game: Colorado's $90.00 stays $90.00, Nebraska's $102.00 seat reads $109.14, and an event publishing no table falls back to the old constant. `feePercentages` and `feeAmount` repeat the ticket and facility figures as a total, so only the ticket and facility parts are summed — counting both would double every fee. ITEM_FEES is logged once so a fee hiding there cannot be missed the way the $5 was.
+
+**The event had no name.** Colorado's ticket page publishes "TT (FB)" and no date at all. The detail object carries the rest: EVENTNAME, SSEVENTNAME, EVENTDTFAC (the facility's own clock, which is what a ticket shows) and FAC_TITLE. It names only the visiting side, so the host school comes from the page title — Paciolan writes "<opponent> | <school>", and Colorado's reads "Texas Tech | University of Colorado".
+
+"TT (FB)" is now **University of Colorado vs Texas Tech**, at Folsom Field, Oct 3 2026 · 17:30. The school is joined only when the title is in that shape and does not already name the host, so a school on another build keeps exactly the name it has today. The field key list is logged once per event for whoever meets the next school.
+
+---
+
 ## September 24, 2026 — v3.0.3
 
 ### Evenue: Schools Whose Price Data Is Server-Rendered

@@ -25,6 +25,8 @@ const down = (src) => src.replace(/ \?\? /g, " || ");
 global.FEE_MULTIPLIER_BY_SITE = { gametime: 1.0 };
 global.FEE_FLAT_BY_SITE = { gametime: 0 };
 global.currentSite = "gametime";
+// Null is the normal case: only Evenue events publish a fee table of their own.
+global.currentFees = null;
 global.centsToUSD = eval("(" + down(extractFn(popup, "centsToUSD")) + ")");
 const buildAllClusters = eval("(" + extractFn(popup, "buildAllClusters") + ")");
 

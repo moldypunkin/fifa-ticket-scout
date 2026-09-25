@@ -9,7 +9,7 @@
   // Three debugging rounds in this project were spent on results produced by a
   // build that had not been reloaded, which is indistinguishable from a change
   // that did not work. Compare this against what package.py prints.
-  const BUILD_STAMP = "048aa8ce";
+  const BUILD_STAMP = "50a5574d";
   
   // Detect which ticketing site we're on
   const isTicketmaster = window.location.hostname.includes('ticketmaster.com');
@@ -344,6 +344,34 @@
     } catch (e) {
       console.log("[EV] could not read the page's ssrData: " + (e && e.message));
     }
+
+    // Who is the home team? The event payload names only the opponent at
+    // Colorado ("Texas Tech (FB)"), so report what the page itself knows: its
+    // title, and any tenant/client/school field in its embedded data.
+    const whoBits = [];
+    try { whoBits.push(`document.title=${JSON.stringify(document.title.slice(0, 90))}`); }
+    catch (e) { /* no DOM */ }
+    try {
+      const WHO = /client|tenant|org|school|team|brand|site ?name|account/i;
+      const seenWho = new Set();
+      const whoWalk = (node, where, depth) => {
+        if (!node || typeof node !== "object" || depth > 6 || whoBits.length > 12) return;
+        if (Array.isArray(node)) {
+          node.slice(0, 3).forEach((v, i) => whoWalk(v, where + "[" + i + "]", depth + 1));
+          return;
+        }
+        for (const k of Object.keys(node)) {
+          const v = node[k];
+          if (WHO.test(k) && typeof v === "string" && v && v.length < 60 && !seenWho.has(v)) {
+            seenWho.add(v);
+            whoBits.push(`${where}.${k}=${JSON.stringify(v)}`);
+          }
+          whoWalk(v, where + "." + k, depth + 1);
+        }
+      };
+      if (window.__NEXT_DATA__) whoWalk(window.__NEXT_DATA__.props, "props", 0);
+    } catch (e) { /* frozen or cross-origin */ }
+    if (whoBits.length) console.log(`[EV] who is the home team: ${whoBits.join(" ")}`);
 
     console.log(`[EV] page-data scan: ${scanned} embedded blob(s) searched`);
     if (found.length) console.log(`[EV] page data FOUND 102: ${found.slice(0, 15).join(" ")}`);

@@ -53,12 +53,33 @@
   // Evenue does publish usable JSON-LD: name/date/venue come through on a
   // real event page (confirmed 2026-08-18), so no site-specific fallback is
   // needed here.
+  // The school hosting this page, from its own <title>. Paciolan writes
+  // "<opponent> | <school>" — Colorado F26:F02 reads "Texas Tech | University
+  // of Colorado" — and the event payload names only the visitor, so this is the
+  // only statement of who is at home. Null when the title is not in that shape,
+  // which leaves the name exactly as it is today.
+  function getEvenueHostName() {
+    try {
+      const parts = String(document.title || "").split("|");
+      if (parts.length < 2) return null;
+      const host = parts[parts.length - 1].trim();
+      // "Tickets" and friends are the site, not a school.
+      if (host.length < 4 || host.length > 60) return null;
+      if (/^(tickets?|home|events?|buy tickets)$/i.test(host)) return null;
+      return host;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function getEvenueEventInfo() {
     if (!window.__eventInfo) {
       console.log("[EV] event-info.js not loaded — no event name/date");
-      return { name: null, date: null, venue: null };
+      return { name: null, date: null, venue: null, host: getEvenueHostName() };
     }
-    return window.__eventInfo.read("EV");
+    const info = window.__eventInfo.read("EV") || {};
+    info.host = getEvenueHostName();
+    return info;
   }
 
   window.__evenueAdapter = {
