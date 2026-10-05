@@ -1740,6 +1740,18 @@ const EVENUE_SCHOOLS = {
     priceSource: "levels",
     hostFromTitle: false,
   },
+  hokiesports: {
+    label: "Virginia Tech",
+    // Confirmed on F26:06 (Lane Stadium): 63,225 rows, 165 on sale, all priced
+    // from the 7-level table, $107.00-$199.00.
+    priceSource: "levels",
+    // The reverse of Colorado: here SSEVENTNAME is the long form ("Football v.
+    // Virginia") and EVENTNAME is the clean opponent ("Virginia"). Reading them
+    // in the default order gives "Virginia Tech vs Football v. Virginia".
+    nameKeys: ["EVENTNAME", "ITEMNAME", "SSEVENTNAME", "TITLE", "EVENT_NAME"],
+    // Title reads "Football v. Virginia | Virginia Tech".
+    hostFromTitle: true,
+  },
   cubuffs: {
     label: "Colorado",
     // Confirmed on F26:F02: 51,539 rows, 4,195 on sale, all priced from the
@@ -2224,6 +2236,26 @@ async function saveEvenuePriceLevels(details, tabId, site, eventInfo, url) {
       performanceId: prev.performanceId || eventId,
     };
     await chrome.storage.local.set({ games });
+
+    // MIN_PRICE/MAX_PRICE are what the site advertises for the event. When they
+    // sit above the cheapest and priciest levels, the difference is a fee this
+    // school charges without publishing it in TIERED_FEES — Virginia Tech
+    // advertises $112.00-$207.00 against a $107.00-$199.00 table. Reported, not
+    // applied: the two gaps here are $5 and $8, so no single rule explains them
+    // and a guess would misprice every seat.
+    const values = Object.keys(levels).map((k) => levels[k]);
+    const lo = Math.min.apply(null, values), hi = Math.max.apply(null, values);
+    const advLo = Number(detail.MIN_PRICE), advHi = Number(detail.MAX_PRICE);
+    if (isFinite(advLo) && isFinite(advHi) && advLo > 0) {
+      const gapLo = Math.round(advLo * 10) - lo, gapHi = Math.round(advHi * 10) - hi;
+      if (gapLo > 0 || gapHi > 0) {
+        bgLog(`[background] Evenue (${profile.label || profile.key}): ${eventId} advertises ` +
+          `$${(advLo / 100).toFixed(2)}-$${(advHi / 100).toFixed(2)} but its level table is ` +
+          `$${(lo / 1000).toFixed(2)}-$${(hi / 1000).toFixed(2)} — a gap of ` +
+          `$${(gapLo / 1000).toFixed(2)}/$${(gapHi / 1000).toFixed(2)} per ticket, ` +
+          `charged but not published in TIERED_FEES`);
+      }
+    }
 
     const preview = Object.keys(levels).sort().slice(0, 8)
       .map((k) => `${k}=$${(levels[k] / 1000).toFixed(2)}`).join(" ");

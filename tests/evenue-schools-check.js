@@ -132,6 +132,32 @@ const COLORADO = {
             name: "University of Colorado vs Texas Tech", date: "03-10-2026 - 17:30" },
 };
 
+// ─── Virginia Tech: the name fields are the reverse of Colorado's ─────────
+// hokiesports F26:06, Lane Stadium. 63,225 rows, 165 on sale, all priced from
+// the level table. SSEVENTNAME is the LONG form here ("Football v. Virginia")
+// and EVENTNAME is the clean opponent — the opposite of Colorado, which is why
+// the name order is per school.
+const VIRGINIA_TECH = {
+  url: "https://hokiesports.evenue.net/pac-api/seat-availability/event-id/457:F26:06/seats",
+  ssrUrl: "https://hokiesports.evenue.net/pac-api/ssr/__NEXT_DATA__",
+  eventId: "F26:06",
+  seats: [[
+    row("EE:1", "20", "4", "6", "O", null, 1),
+    row("EE:1", "20", "5", "6", "O", null, 1),
+    row("WW:3", "8", "12", "1", "O", null, 1),
+    row("WW:3", "8", "13", "1", "X", null, 0),
+  ], HEADERS],
+  detail: {
+    SEASONCD: "F26", ITEMCD: "06", EVENTNAME: "Virginia", ITEMNAME: "Virginia",
+    SSEVENTNAME: "Football v. Virginia", SEASON_NAME: "Football 2026",
+    EVENTDT: "2026-10-17T15:30:00", EVENTDTFAC: "2026-10-17T15:30:00",
+    FAC_TITLE: "Lane Stadium", ITEM_FEES: null, MIN_PRICE: 11200, MAX_PRICE: 20700,
+    PL_PT_PRICES: [{ PRICELEVELCD: "1", PRICE: 19900 }, { PRICELEVELCD: "6", PRICE: 11100 }],
+  },
+  eventInfo: { name: "Virginia", date: null, venue: "Lane Stadium", host: "Virginia Tech" },
+  expect: { seats: 3, name: "Virginia Tech vs Virginia" },
+};
+
 async function runSchool(school, fixture) {
   const w = freshWorker();
   const key = "evenue:" + fixture.eventId;
@@ -154,9 +180,11 @@ async function runSchool(school, fixture) {
     check("Kansas", prof(KANSAS.url).label === "Kansas", prof(KANSAS.url).label);
     check("Nebraska", prof(NEBRASKA.url).label === "Nebraska", prof(NEBRASKA.url).label);
     check("Colorado", prof(COLORADO.url).label === "Colorado", prof(COLORADO.url).label);
-    const unknown = prof("https://hokies.evenue.net/event/F26/01");
+    check("Virginia Tech", prof(VIRGINIA_TECH.url).label === "Virginia Tech",
+      prof(VIRGINIA_TECH.url).label);
+    const unknown = prof("https://gohuskies.evenue.net/event/F26/01");
     check("a school nobody has opened gets the default", unknown.label === null, String(unknown.label));
-    check("and is named by its subdomain", unknown.key === "hokies", unknown.key);
+    check("and is named by its subdomain", unknown.key === "gohuskies", unknown.key);
     check("the default does not force a price source", unknown.priceSource === null);
     // Each school states where its prices come from, so drift is visible.
     check("Kansas prices inline", prof(KANSAS.url).priceSource === "inline");
@@ -217,6 +245,27 @@ async function runSchool(school, fixture) {
     check("the venue is Folsom Field", r.game.match.venue === "Folsom Field");
     check("and says the prices came from the level table",
       r.logs.some((l) => /3 priced from the level table/.test(l)));
+  }
+
+  out("");
+  out("--- Virginia Tech: the clean opponent is EVENTNAME, not SSEVENTNAME ---");
+  {
+    const r = await runSchool("Virginia Tech", VIRGINIA_TECH);
+    check("3 available seats", r.seats.length === VIRGINIA_TECH.expect.seats,
+      String(r.seats.length));
+    // Reading SSEVENTNAME first here gives "Virginia Tech vs Football v. Virginia".
+    check("named Virginia Tech vs Virginia", r.game.match.name === VIRGINIA_TECH.expect.name,
+      r.game.match && r.game.match.name);
+    check("priced from the level table",
+      r.logs.some((l) => /Evenue \(Virginia Tech\): 3 available seats/.test(l)),
+      r.logs.find((l) => /available seats/.test(l)));
+    // $112-$207 advertised against a $107-$199 table: a fee it does not publish.
+    check("the unpublished fee gap is reported",
+      r.logs.some((l) => /advertises \$112\.00-\$207\.00 but its level table is/.test(l)),
+      r.logs.find((l) => /advertises/.test(l)));
+    check("and is not applied to the seats",
+      r.seats.every((s) => s.price === 199000 || s.price === 111000),
+      r.seats.map((s) => s.price).join(","));
   }
 
   out("");

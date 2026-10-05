@@ -20,6 +20,12 @@ Each fix widened a shared guess to cover one more school, which is why fixing on
 
 The service worker now names the school on every line, and says when one stops matching its entry: a school recorded as pricing inline whose seats arrive priced from a level table is reported rather than silently accommodated.
 
+### Evenue: Virginia Tech
+
+`hokiesports` (F26:06, Lane Stadium) confirmed the fallback path works — it captured 165 seats on the default profile with no entry of its own — and then showed why an entry is still needed. Its name fields are the reverse of Colorado's: `EVENTNAME` is the clean opponent ("Virginia") while `SSEVENTNAME` is the long form ("Football v. Virginia"). On the shared order it read "Virginia Tech vs Football v. Virginia"; with its own entry it reads **Virginia Tech vs Virginia**. No single order can be right for both schools, which is the case for per-school profiles in one line.
+
+It also charges a fee it does not publish: the level table runs $107.00-$199.00 while the page advertises the event as $112.00-$207.00. That is where the old flat $5 constant came from. The gap is **reported, not applied** — $5 at the bottom and $8 at the top is not one rule, and any single guess would misprice most seats the way the withdrawn Nebraska fix would have. Any school whose advertised range sits above its own price table now says so in the service worker.
+
 ### Evenue: The Event Name Depended on Arrival Order
 
 Found by the new suite, not in the wild. Colorado's seats carry the page's name ("TT (FB)") and its price table carries the real one. Whichever arrived second won, so "University of Colorado vs Texas Tech" survived only because the table happened to arrive after the seats. A stored name now beats an incoming internal code either way round.
