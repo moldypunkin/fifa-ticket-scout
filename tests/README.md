@@ -36,6 +36,7 @@ passed while the extension misbehaved.
 | `brand-check` | popup site labels, brands, fee multipliers |
 | `seatgeek-check` / `stubhub-check` / `evenue-check` / `tickpick-check` | per-source plumbing: ids, capture patterns, parsers |
 | `evenue-parse-check` | Evenue's positional rows, mapped by header name |
+| `evenue-schools-check` | every Evenue school end to end, each against its own captured payload — Paciolan builds differ per school, so this is what stops a fix for one denting another |
 | `tm-audit-check` | Ticketmaster price resolution and the cheapest-seat audit |
 | `probe-format-check` | discovery probe output format and log-relay tagging |
 

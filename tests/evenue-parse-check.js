@@ -153,23 +153,34 @@ out("\n--- event identity from the detail object (Colorado) ---");
 // cubuffs.evenue.net publishes only "TT (FB)" and no date on the page itself;
 // the detail object carries the real name, date and venue. Field names taken
 // from the live F26:F02 key list.
+// The profile registry the parser reads: schools differ, and the default is
+// what a school nobody has opened yet gets.
+// A direct eval keeps `const` scoped to the eval, so the object literal is
+// taken on its own and assigned here.
+const literal = (name) => eval("(" +
+  src.match(new RegExp("const " + name + " = (\\{[\\s\\S]*?\\n\\});"))[1] + ")");
+global.EVENUE_DEFAULT = literal("EVENUE_DEFAULT");
+global.EVENUE_SCHOOLS = literal("EVENUE_SCHOOLS");
+global.URL = URL;
+const evenueProfile = eval("(" + extractFn(src, "evenueProfile") + ")");
 const detailIdentity = eval("(" + extractFn(src, "evenueDetailIdentity") + ")");
 global.isoToDisplayDate = eval("(" + extractFn(src, "isoToDisplayDate").replace(/\?\?/g, "||") + ")");
 global.bgLog = () => {};
 global.evenueDetailKeysLogged = new Set();
+const CU_URL = "https://cubuffs.evenue.net/event/F26/F02";
 // Exactly as the live F26:F02 payload prints them.
 const CU = { ITEMCD: "F02", SEASONCD: "F26", ITEMNAME: "TT (FB)", SSEVENTNAME: "Texas Tech",
   EVENTNAME: "Texas Tech (FB)", SEASON_NAME: "2026 Football",
   EVENTDT: "2026-10-03T19:30:00", EVENTDTFAC: "2026-10-03T17:30:00",
   FAC_TITLE: "Folsom Field", FAC_SSTITLE: "Folsom Field", ITEM_FEES: null };
-const cu = detailIdentity(CU, "F26:F02", "University of Colorado");
+const cu = detailIdentity(CU, "F26:F02", "University of Colorado", evenueProfile(CU_URL));
 // The payload names only the visitor; the host comes from the page <title>,
 // "Texas Tech | University of Colorado".
 eq("host and opponent are joined", cu.name, "University of Colorado vs Texas Tech");
-eq("the clean opponent wins over the sport code", detailIdentity(CU, "x", null).name, "Texas Tech");
-eq("no host leaves the name alone", detailIdentity(CU, "y", null).name.indexOf(" vs "), -1);
+eq("the clean opponent wins over the sport code", detailIdentity(CU, "x", null, evenueProfile(CU_URL)).name, "Texas Tech");
+eq("no host leaves the name alone", detailIdentity(CU, "y", null, evenueProfile(CU_URL)).name.indexOf(" vs "), -1);
 eq("a name already naming the host is left alone",
-  detailIdentity({ SSEVENTNAME: "Colorado vs Texas Tech" }, "z", "Colorado").name,
+  detailIdentity({ SSEVENTNAME: "Colorado vs Texas Tech" }, "z", "Colorado", evenueProfile(CU_URL)).name,
   "Colorado vs Texas Tech");
 const adapterSrc = fs.readFileSync(EXT + "evenue-adapter.js", "utf8");
 eq("the adapter reads the host off the title", /function getEvenueHostName/.test(adapterSrc), true);
@@ -178,7 +189,7 @@ eq("and ships it with the event info", /info\.host = getEvenueHostName\(\)/.test
 eq("date comes from EVENTDTFAC", cu.date, "03-10-2026 - 17:30");
 eq("venue comes from FAC_TITLE", cu.venue, "Folsom Field");
 eq("the internal code is not the name", cu.name === CU.ITEMNAME, false);
-eq("no detail is not a crash", JSON.stringify(detailIdentity(null, "x", "Colorado")), "{}");
+eq("no detail is not a crash", JSON.stringify(detailIdentity(null, "x", "Colorado", evenueProfile(CU_URL))), "{}");
 // A page name that is a real event name must not be replaced by the payload.
 eq("the code test spots an internal code", /const isCode = /.test(src), true);
 eq("a stored name is kept unless it is a code",
@@ -189,7 +200,9 @@ const inj = fs.readFileSync(EXT + "injected.js", "utf8");
 eq("captures the seat-availability path", /"\/pac-api\/"/.test(inj), true);
 eq("discovery not armed for evenue", /DISCOVERY_SITE = isEvenue/.test(inj), false);
 eq("event info wired", /isEvenue \? window\.__evenueAdapter/.test(inj), true);
-eq("background dispatches", /saveEvenueSeats\(eventId, body, tabId, site, eventInfo\)/.test(src), true);
+// The url goes with it: evenueProfile() keys the school off the hostname.
+eq("background dispatches",
+  /saveEvenueSeats\(eventId, body, tabId, site, eventInfo, url\)/.test(src), true);
 
 out(fail ? `\n${fail} FAILURES` : "\nall passed");
 process.exit(fail ? 1 : 0);

@@ -4,6 +4,32 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## October 5, 2026 — v3.0.5
+
+### Evenue: One Profile Per School
+
+Evenue is Paciolan and every school runs its own build of it. Three schools, three contradictions:
+
+| school | seat prices | price table | fee | event name |
+| --- | --- | --- | --- | --- |
+| `kuathletics` | SLP_PRICE on the row | over the network | from its table | from the page |
+| `huskers` | only on SOLD seats | never arrives | 7% | from the page |
+| `cubuffs` | none | server-rendered in the page | none | page has only "TT (FB)" |
+
+Each fix widened a shared guess to cover one more school, which is why fixing one kept denting the last. A school now has its own entry in `EVENUE_SCHOOLS`, keyed by subdomain, stating where its prices come from, which fee fields to read, which detail fields name the event, and whether the host school should be joined on from the page title. Anything an entry does not state falls back to `EVENUE_DEFAULT` — the generic behaviour, which is what a school nobody has opened yet still gets, confirmed live on hokiesports (Virginia Tech, F26:06, Lane Stadium).
+
+The service worker now names the school on every line, and says when one stops matching its entry: a school recorded as pricing inline whose seats arrive priced from a level table is reported rather than silently accommodated.
+
+### Evenue: The Event Name Depended on Arrival Order
+
+Found by the new suite, not in the wild. Colorado's seats carry the page's name ("TT (FB)") and its price table carries the real one. Whichever arrived second won, so "University of Colorado vs Texas Tech" survived only because the table happened to arrive after the seats. A stored name now beats an incoming internal code either way round.
+
+### tests/evenue-schools-check.js
+
+Every school, end to end, against its own captured payload, in one run: Kansas priced from the row, Nebraska storing nothing rather than borrowing a $220 season price for a $102 seat, Colorado priced from the page's table and named from its title. It also pins the cross-contamination cases — Kansas is not renamed by its page title, and Nebraska's parked payload does not strand Colorado's seats. 41 suites.
+
+---
+
 ## September 25, 2026 — v3.0.4
 
 ### Evenue: Per-Event Fees, Real Event Names

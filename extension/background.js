@@ -943,14 +943,14 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
     const eventId = evenueEventIdFromUrl(url);
     if (eventId) {
       await enforceGameLimit(`${site}:${eventId}`);
-      await saveEvenueSeats(eventId, body, tabId, site, eventInfo);
+      await saveEvenueSeats(eventId, body, tabId, site, eventInfo, url);
     } else {
       bgLog(`[background] Evenue: array payload on ${url.split("?")[0]} but no ` +
         `event id in the url — add its shape to evenueEventIdFromUrl()`);
     }
   } else if (site === "evenue" && url.includes("/pac-api/")
              && evenueFindEventDetails(body).length) {
-    await saveEvenuePriceLevels(evenueFindEventDetails(body), tabId, site, eventInfo);
+    await saveEvenuePriceLevels(evenueFindEventDetails(body), tabId, site, eventInfo, url);
   } else if (site === "evenue" && url.includes("/pac-api/")) {
     // Not an array, so not the seat payload. Name it once per path: on a school
     // whose inventory arrives some other way this is the only breadcrumb, but
@@ -968,9 +968,19 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
     evenueLogFeeTable(body);
     // Same payload, but kept rather than only printed: the popup needs it to
     // quote what a buyer pays.
-    const feeRaw = body && body.data && body.data.maps_eventMap
-      ? body.data.maps_eventMap.TIERED_FEES : null;
-    if (feeRaw !== null && feeRaw !== undefined) await evenueRecordFeeRule(tabId, feeRaw);
+    const feeProfile = evenueProfile(url);
+    const feeSource = body && body.data && body.data.maps_eventMap
+      ? body.data.maps_eventMap : null;
+    if (feeSource) {
+      for (const key of feeProfile.feeKeys || EVENUE_DEFAULT.feeKeys) {
+        const raw = feeSource[key];
+        if (raw === null || raw === undefined) continue;
+        const rule = await evenueRecordFeeRule(tabId, raw, feeProfile, key);
+        // The first key that yields a rule wins; an empty table IS a rule
+        // (Colorado charges nothing), so a null here means unparseable.
+        if (rule) break;
+      }
+    }
     const shape = describeShape(body, 5);
     const seen = path + " " + shape;
     if (!evenueIgnoredPaths.has(seen)) {
@@ -1675,6 +1685,82 @@ async function saveStubHubSeats(eventId, body, tabId, site, eventInfo) {
 // different builds; all normalise to the "<season>:<code>" the adapter and the
 // popup both use, dropping any leading venue/distributor segment
 // ("977:F26:02" -> "F26:02").
+// ─── Evenue school profiles ───────────────────────────────────────────────
+// Evenue is Paciolan, and every school runs its own build of it. Three seen so
+// far, and each contradicts the others:
+//
+//   kuathletics  seats carry SLP_PRICE inline; the price table arrives over the
+//                network; the page names the event
+//   huskers      only SOLD seats carry a price, the seats on sale carry none,
+//                and no price table arrives at all; charges 7%
+//   cubuffs      seats carry no price and the table is server-rendered into the
+//                page; charges nothing; the page names only the opponent
+//
+// Each fix for one school used to widen a shared guess, which is how fixing one
+// kept denting another. A school now gets its own entry, and anything it does
+// not state falls back to EVENUE_DEFAULT — the generic behaviour, which is what
+// a school nobody has opened yet still gets.
+//
+// Keys are matched against the hostname, so "huskers" matches
+// huskers.evenue.net. Adding a school is an entry here plus a fixture in
+// tests/evenue-schools-check.js, which locks every other school's behaviour
+// at the same time.
+const EVENUE_DEFAULT = {
+  label: null,
+  // Where a seat's price comes from: "inline" (SLP_PRICE on the row),
+  // "levels" (join PRICELEVELCD against the price table), or null for "try
+  // inline, then levels", which is what an unknown school gets.
+  priceSource: null,
+  // Field names in the event detail object, best first.
+  nameKeys: ["SSEVENTNAME", "EVENTNAME", "EVENT_NAME", "TITLE", "EVENT_TITLE", "NAME",
+    "DESCRIPTION", "EVENT_DESC", "LONG_DESC", "SHORT_DESC", "ITEMNAME"],
+  dateKeys: ["EVENTDTFAC", "EVENTDT", "EVENT_DATE", "EVENTDATE", "PERF_DATE",
+    "START_DATE", "EVENT_DT", "STARTDT", "PERF_DT", "DATE"],
+  venueKeys: ["FAC_TITLE", "FAC_SSTITLE", "VENUE_NAME", "VENUENAME", "FACILITY_NAME", "VENUE"],
+  // Join the host school from the page title onto a payload name that gives
+  // only the visitor.
+  hostFromTitle: true,
+  // Fee fields to read, in order. The first that parses wins.
+  feeKeys: ["TIERED_FEES", "ITEM_FEES"],
+};
+
+const EVENUE_SCHOOLS = {
+  kuathletics: {
+    label: "Kansas",
+    // Confirmed on F26:02: 49,233 rows, SLP_PRICE on the row itself.
+    priceSource: "inline",
+    hostFromTitle: false,
+  },
+  huskers: {
+    label: "Nebraska",
+    // Confirmed on F26:06: 88,349 rows, 186 on sale, every one priceless, and
+    // the detail object carries MIN_PRICE/MAX_PRICE but no PL_PT_PRICES. Until
+    // a price table turns up this school reports seats it cannot price, which
+    // the summary line says out loud.
+    priceSource: "levels",
+    hostFromTitle: false,
+  },
+  cubuffs: {
+    label: "Colorado",
+    // Confirmed on F26:F02: 51,539 rows, 4,195 on sale, all priced from the
+    // 7-level table in the page. Charges nothing, and the page publishes only
+    // "TT (FB)", so the host school comes from its title.
+    priceSource: "levels",
+    hostFromTitle: true,
+  },
+};
+
+function evenueProfile(url) {
+  let host = "";
+  try { host = new URL(String(url || "")).hostname.toLowerCase(); } catch (e) { host = ""; }
+  for (const key of Object.keys(EVENUE_SCHOOLS)) {
+    if (host.indexOf(key) !== -1) {
+      return Object.assign({}, EVENUE_DEFAULT, EVENUE_SCHOOLS[key], { key });
+    }
+  }
+  return Object.assign({}, EVENUE_DEFAULT, { key: host.split(".")[0] || "unknown" });
+}
+
 function evenueEventIdFromUrl(url) {
   const path = String(url || "");
 
@@ -1976,21 +2062,24 @@ function evenueFeeRule(raw) {
 // GraphQL response that names no event.
 const evenuePendingFees = new Map();
 
-async function evenueRecordFeeRule(tabId, raw) {
+async function evenueRecordFeeRule(tabId, raw, profile, fieldName) {
   const rule = evenueFeeRule(raw);
-  if (!rule) return;
+  if (!rule) return null;
+  const school = profile ? (profile.label || profile.key) : "?";
   if (tabId != null) evenuePendingFees.set(tabId, rule);
   const gameKey = tabId != null ? tabGameMap[tabId] : null;
-  if (!gameKey) return;
+  if (!gameKey) return rule;
   const data = await getStorage();
   const games = data.games || {};
-  if (!games[gameKey]) return;
+  if (!games[gameKey]) return rule;
   const prev = games[gameKey].fees || {};
-  if (prev.pct === rule.pct && prev.flat === rule.flat) return;
+  if (prev.pct === rule.pct && prev.flat === rule.flat) return rule;
   games[gameKey].fees = rule;
   await chrome.storage.local.set({ games });
-  bgLog(`[background] Evenue: ${gameKey} fee rule ${rule.pct}% + $${rule.flat.toFixed(2)} ` +
-    `per ticket (${rule.tiers} tier(s) published)`);
+  bgLog(`[background] Evenue (${school}): ${gameKey} fee rule ${rule.pct}% + ` +
+    `$${rule.flat.toFixed(2)} per ticket, from ${fieldName || "the fee table"} ` +
+    `(${rule.tiers} tier(s) published)`);
+  return rule;
 }
 
 function evenueLogFeeTable(node, depth) {
@@ -2031,7 +2120,8 @@ const evenueIgnoredPaths = new Set();
 // school.
 const evenueDetailKeysLogged = new Set();
 
-function evenueDetailIdentity(detail, eventId, hostName) {
+function evenueDetailIdentity(detail, eventId, hostName, profile) {
+  const prof = profile || EVENUE_DEFAULT;
   if (!detail || typeof detail !== "object") return {};
   if (!evenueDetailKeysLogged.has(eventId)) {
     evenueDetailKeysLogged.add(eventId);
@@ -2071,28 +2161,26 @@ function evenueDetailIdentity(detail, eventId, hostName) {
   // SSEVENTNAME is the clean opponent ("Texas Tech"); EVENTNAME carries the
   // sport code after it ("Texas Tech (FB)"); ITEMNAME is an abbreviation
   // ("TT (FB)"). Prefer the clean one, then fall back down the list.
-  const opponent = pick("SSEVENTNAME", "EVENTNAME", "EVENT_NAME", "TITLE", "EVENT_TITLE",
-    "NAME", "DESCRIPTION", "EVENT_DESC", "LONG_DESC", "SHORT_DESC", "ITEMNAME");
+  const opponent = pick.apply(null, prof.nameKeys || EVENUE_DEFAULT.nameKeys);
   // The payload names only the visiting side, so the host comes from the page.
   // "University of Colorado vs Texas Tech" beats "Texas Tech (FB)".
-  const host = hostName ? String(hostName).trim() : null;
+  const host = (prof.hostFromTitle !== false && hostName) ? String(hostName).trim() : null;
   const name = opponent && host && opponent.toLowerCase() !== host.toLowerCase()
     && opponent.toLowerCase().indexOf(host.toLowerCase()) === -1
     ? `${host} vs ${opponent}`
     : opponent;
   // EVENTDTFAC is the facility's own clock where the two differ, which is what a
   // ticket shows; EVENTDT is the fallback, then the on-sale start.
-  const rawDate = pick("EVENTDTFAC", "EVENTDT", "EVENT_DATE", "EVENTDATE", "PERF_DATE",
-    "START_DATE", "EVENT_DT", "STARTDT", "PERF_DT", "DATE");
+  const rawDate = pick.apply(null, prof.dateKeys || EVENUE_DEFAULT.dateKeys);
   return {
     name: name || null,
     date: rawDate ? (isoToDisplayDate(rawDate) || rawDate) : null,
-    venue: pick("FAC_TITLE", "FAC_SSTITLE", "VENUE_NAME", "VENUENAME", "FACILITY_NAME",
-      "VENUE") || null,
+    venue: pick.apply(null, prof.venueKeys || EVENUE_DEFAULT.venueKeys) || null,
   };
 }
 
-async function saveEvenuePriceLevels(details, tabId, site, eventInfo) {
+async function saveEvenuePriceLevels(details, tabId, site, eventInfo, url) {
+  const profile = evenueProfile(url);
   for (const detail of details) {
     const eventId = evenueEventIdFromDetail(detail);
     if (!eventId) continue;
@@ -2123,7 +2211,7 @@ async function saveEvenuePriceLevels(details, tabId, site, eventInfo) {
     games[gameKey].site = site;
     // Fill in identity this object knows and the page does not. Never overwrite
     // a value already stored: the page read wins when it produced something.
-    const ident = evenueDetailIdentity(detail, eventId, eventInfo && eventInfo.host);
+    const ident = evenueDetailIdentity(detail, eventId, eventInfo && eventInfo.host, profile);
     const prev = games[gameKey].match || {};
     const pageName = (eventInfo && eventInfo.name) || prev.name || null;
     // "TT (FB)", "F26" and friends are internal codes, not event names.
@@ -2147,7 +2235,8 @@ async function saveEvenuePriceLevels(details, tabId, site, eventInfo) {
     if (pending) {
       evenuePendingSeats.delete(gameKey);
       bgLog(`[background] Evenue: re-parsing held seat payload for ${eventId} now prices are known`);
-      await saveEvenueSeats(eventId, pending.body, pending.tabId, site, pending.eventInfo);
+      await saveEvenueSeats(eventId, pending.body, pending.tabId, site, pending.eventInfo,
+        pending.url);
     }
   }
 }
@@ -2189,7 +2278,8 @@ function evenueSplitPayload(body) {
   return { rows, headers };
 }
 
-async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
+async function saveEvenueSeats(eventId, body, tabId, site, eventInfo, url) {
+  const profile = evenueProfile(url);
   const split = evenueSplitPayload(body);
   const rows = split.rows;
   const headers = split.headers;
@@ -2197,7 +2287,8 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
     // Name what arrived. The header row is found by sniffing for known column
     // names, so a school whose columns are named differently lands here and
     // the shape is the only way to tell that from an empty event.
-    bgLog(`[background] Evenue: could not find rows + header row in the payload. ` +
+    bgLog(`[background] Evenue (${profile.label || profile.key}): could not find rows + ` +
+      `header row in the payload. ` +
       `Got ${describeShape(body, 2)}; elements: ` +
       (Array.isArray(body) ? body.map((e) => describeShape(e, 1)).join(" | ") : "n/a") +
       `. rows=${rows ? "found" : "MISSING"} headers=${headers ? "found" : "MISSING"}`);
@@ -2235,8 +2326,15 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
     // back to heuristic tiers. gameKey is per-event, so what is already stored
     // belongs to this same event and is safe to keep.
     const prev = games[gameKey].match || {};
+    // A stored name that came from the event payload beats the page's, when
+    // the page's is only an internal code. Colorado publishes "TT (FB)";
+    // whether that or "University of Colorado vs Texas Tech" survived used to
+    // depend on whether the price table arrived before the seats or after.
+    const isCode = (v) => !v || v.length <= 12 || /^[A-Z0-9 ()._-]+$/.test(v);
+    const keptName = (isCode(eventInfo.name) && prev.name && !isCode(prev.name))
+      ? prev.name : eventInfo.name;
     games[gameKey].match = {
-      name: eventInfo.name,
+      name: keptName,
       date: eventInfo.date || prev.date || null,
       venue: eventInfo.venue || prev.venue || null,
       currency: "USD",
@@ -2378,15 +2476,28 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo) {
   // response can trigger a re-parse instead of the user reloading; on this
   // build the prices normally come first, but the order is not guaranteed.
   if (!total && missingPrice && !Object.keys(priceLevels).length) {
-    evenuePendingSeats.set(gameKey, { body, tabId, eventInfo });
+    evenuePendingSeats.set(gameKey, { body, tabId, eventInfo, url });
     bgLog(`[background] Evenue: holding ${rows.length}-row payload for ${eventId} ` +
       `until the price-level table arrives`);
   }
 
-  bgLog(`[background] Evenue: ${total} available seats from ${rows.length} rows` +
+  const school = profile.label || profile.key;
+  const fromInline = total - fromPriceLevel;
+  bgLog(`[background] Evenue (${school}): ${total} available seats from ${rows.length} rows` +
     (unavailable ? `, ${unavailable} unavailable/hidden` : "") +
     (missingPrice ? `, ${missingPrice} had no price` : "") +
-    (fromPriceLevel ? `, ${fromPriceLevel} priced from the level table` : ""));
+    (fromPriceLevel ? `, ${fromPriceLevel} priced from the level table` : "") +
+    (fromInline ? `, ${fromInline} priced inline` : ""));
+  // A school that stops behaving like its profile is the thing that used to go
+  // unnoticed until someone looked at a popup. Say it here instead.
+  if (total) {
+    const actual = fromPriceLevel && !fromInline ? "levels"
+      : fromInline && !fromPriceLevel ? "inline" : "mixed";
+    if (profile.priceSource && actual !== profile.priceSource) {
+      bgLog(`[background] Evenue (${school}): prices came from ${actual}, but this school ` +
+        `is recorded as ${profile.priceSource} — update EVENUE_SCHOOLS if the site changed`);
+    }
+  }
 
   games[gameKey].seats = { ...games[gameKey].seats, ...seats };
   games[gameKey].site = site;
