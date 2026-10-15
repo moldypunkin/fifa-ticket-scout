@@ -492,6 +492,92 @@ function showEmpty(detected) {
   }
 }
 
+// ─── Section filter ──────────────────────────────────────────────────────
+// Typed into the box above the category tabs, applied to every source: it
+// matches a seat's `block`, which every parser fills with the section.
+//
+// Deliberately not persisted. A filter restored from a previous session looks
+// exactly like an event that captured almost nothing, which is the kind of
+// thing that costs an afternoon.
+let sectionFilter = "";
+let currentGameData = null;
+
+// "114, 115" and "114 115" both mean the same two sections.
+function sectionFilterTerms(raw) {
+  return String(raw || "")
+    .split(/[\s,;]+/)
+    .map((t) => t.trim().toUpperCase())
+    .filter(Boolean);
+}
+
+// A seat matches when any term matches its block. Exact first, then a
+// word-ish match ("114" finds "Club 114"), then a plain substring so a partial
+// number narrows as you type.
+function seatMatchesSection(seat, terms) {
+  if (!terms.length) return true;
+  const block = String((seat && seat.block) || "").toUpperCase();
+  if (!block) return false;
+  for (const term of terms) {
+    if (block === term) return true;
+    if (new RegExp("(^|[^A-Z0-9])" + escapeRegExp(term) + "([^A-Z0-9]|$)").test(block)) return true;
+    // Substring only for two characters or more: a lone "C" would otherwise
+    // match Club, Concourse and every section with a C in it.
+    if (term.length > 1 && block.indexOf(term) !== -1) return true;
+  }
+  return false;
+}
+
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function applySectionFilter(seats) {
+  const terms = sectionFilterTerms(sectionFilter);
+  if (!terms.length) return seats;
+  return seats.filter((s) => seatMatchesSection(s, terms));
+}
+
+// Says what the filter did, including when it matched nothing — otherwise an
+// empty dashboard is indistinguishable from an event with no seats.
+function renderSectionFilterInfo(shown, total) {
+  const info = document.getElementById("sectionFilterInfo");
+  const input = document.getElementById("sectionFilter");
+  const clear = document.getElementById("sectionFilterClear");
+  if (!info || !input || !clear) return;
+  const terms = sectionFilterTerms(sectionFilter);
+  clear.style.display = terms.length ? "block" : "none";
+  if (!terms.length) {
+    info.textContent = "";
+    info.classList.remove("no-match");
+    input.classList.remove("no-match");
+    return;
+  }
+  const none = shown === 0;
+  info.textContent = none
+    ? `no seats in ${terms.join(", ")}`
+    : `${shown} of ${total} seats`;
+  info.classList.toggle("no-match", none);
+  input.classList.toggle("no-match", none);
+}
+
+function wireSectionFilter() {
+  const input = document.getElementById("sectionFilter");
+  const clear = document.getElementById("sectionFilterClear");
+  if (!input || input.dataset.wired) return;
+  input.dataset.wired = "1";
+  const redraw = () => {
+    sectionFilter = input.value;
+    if (currentGameData) renderDashboard(currentGameData);
+  };
+  input.addEventListener("input", redraw);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && input.value) { input.value = ""; redraw(); }
+  });
+  if (clear) {
+    clear.addEventListener("click", () => { input.value = ""; redraw(); input.focus(); });
+  }
+}
+
 function renderDashboard(game) {
   document.getElementById("noData").style.display = "none";
   document.getElementById("dashboard").style.display = "block";
@@ -505,8 +591,15 @@ function renderDashboard(game) {
     });
   }
 
-  const seats = Object.values(game.seats || {}).filter(s => s.exclusive !== false && s.price != null);
+  const allSeats = Object.values(game.seats || {}).filter(s => s.exclusive !== false && s.price != null);
   const match = game.match;
+
+  // Filtered once, here: everything below draws from the same list, so the
+  // stats, the category tabs, the best deals and the block table always agree.
+  currentGameData = game;
+  wireSectionFilter();
+  const seats = applySectionFilter(allSeats);
+  renderSectionFilterInfo(seats.length, allSeats.length);
 
   renderMatchInfo(match, seats.length);
   renderStatsBar(seats);

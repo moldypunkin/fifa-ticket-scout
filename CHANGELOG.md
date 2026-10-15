@@ -4,6 +4,25 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## October 15, 2026 — v3.0.6
+
+### Section Filter
+
+A box above the category tabs: type a section and the dashboard narrows to it. Every source gets it at once, because it matches the seat's `block` — the field every parser already fills — rather than anything source-specific.
+
+It is applied once in `renderDashboard()`, before anything is drawn, so the header's seat count, the cheapest/median/highest stats, the histogram, the category tabs, Best Deals and the block table all read from the same list and cannot disagree.
+
+Matching, in order: exact, then the number inside a prefixed block ("114" finds "Club 114" and "NS:33" answers to "33"), then a plain substring so typing narrows as you go ("11" still shows 114 and 115). A single character matches only itself — a lone "C" would otherwise pull in Club, Concourse and every section with a C in it. Several sections are an OR: "114, 115" or "114 115".
+
+Two deliberate choices:
+
+- **Not persisted.** A filter restored from a previous session is indistinguishable from an event that captured almost nothing.
+- **An empty result says "no seats in 114"** in red rather than showing a blank dashboard, for the same reason.
+
+The box lives in `popup.html` rather than in rendered html: the dashboard redraws on every keystroke, and an input inside that html would lose focus each time. `tests/section-filter-check.js` pins the matching rules, that the filter runs before every renderer, and both choices above. 42 suites.
+
+---
+
 ## October 5, 2026 — v3.0.5
 
 ### Evenue: One Profile Per School

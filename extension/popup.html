@@ -67,6 +67,19 @@
     <!-- Stats Bar -->
     <div class="stats-bar" id="statsBar"></div>
 
+    <!-- Section filter. Applied in renderDashboard() before anything is drawn,
+         so the stats, categories, best deals and block table all show the same
+         seats. Works on every source: it reads the seat's block, which every
+         parser fills. -->
+    <div class="section-filter-row">
+      <input type="text" id="sectionFilter" class="section-filter-input"
+             placeholder="Filter by section — e.g. 114 or 114, 115" autocomplete="off"
+             spellcheck="false">
+      <button id="sectionFilterClear" class="section-filter-clear" title="Clear the section filter"
+              style="display:none;">&times;</button>
+      <span class="section-filter-info" id="sectionFilterInfo"></span>
+    </div>
+
     <!-- Category Tabs + Content -->
     <div class="section cat-tabs-section">
       <!-- Group the tabs below by the site's own category, or by the seat tier

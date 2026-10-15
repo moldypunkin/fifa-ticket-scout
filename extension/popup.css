@@ -2723,3 +2723,60 @@ body {
   background: #fdf3f2;
   border-color: #f3d3d0;
 }
+
+/* ─── Section filter ─────────────────────────────────────────────────────
+   One box above the tabs. Lives in popup.html rather than in rendered html
+   so typing never loses focus when the dashboard redraws on each keystroke. */
+.section-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px 0;
+}
+
+.section-filter-input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid #d6dced;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  color: #1a2a4f;
+  background: #fff;
+}
+
+.section-filter-input::placeholder { color: #9aa6c2; }
+
+.section-filter-input:focus {
+  outline: none;
+  border-color: #1a3d8f;
+  box-shadow: 0 0 0 2px rgba(26, 61, 143, 0.12);
+}
+
+.section-filter-input.no-match {
+  border-color: #c0392b;
+  box-shadow: 0 0 0 2px rgba(192, 57, 43, 0.12);
+}
+
+.section-filter-clear {
+  border: none;
+  background: #eef1f8;
+  color: #51608a;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.section-filter-clear:hover { background: #dde3f2; color: #1a2a4f; }
+
+.section-filter-info {
+  font-size: 11px;
+  color: #6b7a9e;
+  white-space: nowrap;
+}
+
+.section-filter-info.no-match { color: #c0392b; }
