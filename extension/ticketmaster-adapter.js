@@ -185,11 +185,87 @@
       }
 
       const data = await response.json();
-      return data;
+
+      // ISMDS pages its facets. The first response carries `page` and a
+      // `_links.next` when there is more, and taking only page one is how a
+      // Nebraska resale event reported 1,739 seats while section 206 — sitting
+      // on a later page — was missing from the dashboard entirely.
+      return await followFacetPages(data, headers, params);
     } catch (error) {
       console.log(`[TM] Facets fetch error: ${error.message}`);
       return null;
     }
+  }
+
+  // The href on a page link is relative to the ismds root and already carries
+  // the query, but not always the credentials, so they are put back.
+  function facetsNextUrl(data) {
+    const links = data && data._links;
+    const next = links && links.next;
+    const href = !next ? null : (Array.isArray(next) ? (next[0] || {}).href : next.href);
+    if (!href) return null;
+    const base = 'https://services.ticketmaster.com/api/ismds';
+    const url = href.indexOf('http') === 0 ? href : base + href;
+    if (url.indexOf('apikey=') !== -1) return url;
+    return url + (url.indexOf('?') === -1 ? '?' : '&') +
+      'apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse';
+  }
+
+  function facetsPageNote(data) {
+    const page = data && data.page;
+    if (!page) return 'no page block';
+    return `page ${page.number != null ? page.number : '?'} of ` +
+      `${page.totalPages != null ? page.totalPages : '?'}, ` +
+      `${page.totalElements != null ? page.totalElements : '?'} facet(s) in total`;
+  }
+
+  // Walk the pages and fold them into the first response, so everything
+  // downstream still sees one body with one facets array.
+  async function followFacetPages(first, headers, params) {
+    if (!first) return first;
+    const MAX_PAGES = 40;   // 40 x the page size is far beyond any real event
+    let pages = 1;
+    let next = facetsNextUrl(first);
+    console.log(`[TM] facets ${facetsPageNote(first)}; ` +
+      `${(first.facets || []).length} on this page` + (next ? ', more to follow' : ''));
+
+    while (next && pages < MAX_PAGES) {
+      let more;
+      try {
+        const res = await fetch(next, { method: 'GET', headers, credentials: 'include' });
+        if (!res.ok) {
+          console.log(`[TM] facets page ${pages + 1} failed with status ${res.status} — ` +
+            `keeping the ${(first.facets || []).length} facet(s) already fetched`);
+          break;
+        }
+        more = await res.json();
+      } catch (e) {
+        console.log(`[TM] facets page ${pages + 1} errored: ${e.message} — keeping what is already fetched`);
+        break;
+      }
+      pages++;
+      if (Array.isArray(more.facets)) {
+        first.facets = (first.facets || []).concat(more.facets);
+      }
+      // The offers are what carry price; a facet whose offer stayed on another
+      // page would be stored priceless.
+      if (more._embedded && Array.isArray(more._embedded.offer)) {
+        first._embedded = first._embedded || {};
+        first._embedded.offer = (first._embedded.offer || []).concat(more._embedded.offer);
+      }
+      next = facetsNextUrl(more);
+    }
+
+    if (pages > 1) {
+      console.log(`[TM] facets: followed ${pages} pages, ` +
+        `${(first.facets || []).length} facet(s) and ` +
+        `${((first._embedded || {}).offer || []).length} offer(s) in total`);
+    }
+    if (next && pages >= MAX_PAGES) {
+      console.log(`[TM] facets: stopped at ${MAX_PAGES} pages with more still listed — ` +
+        `raise MAX_PAGES if an event is genuinely this large`);
+    }
+    return first;
   }
 
   // Parse Ticketmaster facets response into seat data

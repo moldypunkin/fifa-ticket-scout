@@ -4,6 +4,36 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## October 20, 2026 — v3.0.7
+
+### Ticketmaster: Resale Listings That Publish No Seats
+
+Reported as a section filter returning nothing for 206 on a Nebraska event (Z7r9jZ1A7Oaq7, Memorial Stadium) while the map plainly showed a $1,005.70 listing there. The filter was right; the seats were never captured.
+
+867 of that event's 1,429 listings come back with a section, a count, and nothing else:
+
+```
+{"available":true,"inventoryTypes":["resale"],"offerTypes":["thirdparty"],
+ "offers":["HB6..."],"seating":"reserved","section":"3","count":2,"places":[]}
+```
+
+Seats were only ever built from `places`, so all 867 were dropped in silence — twenty whole sections (204, 206, 207, 209, 223, 224, 227, 229, 230, 402-411, 613) missing from a dashboard that reported 1,739 seats and looked complete.
+
+A listing with a count but no places is now kept as that many seats in its section:
+
+- **Nothing is invented.** Row and seat stay empty rather than guessed; the popup already groups unnumbered seats as "N together" without claiming adjacency.
+- **Two listings in one section stay apart**, keyed by listing id — otherwise a 4-seat listing at $150 would overwrite a 2-seat one at $265.93.
+- **They carry `resale` as their category**, so they are distinguishable from standard inventory in the Category tabs.
+- Listings with no section at all still cannot be filed anywhere and remain dropped, but the count is now logged rather than silent.
+
+A section census now reports how many sections arrived against how many produced seats, which is what made this diagnosable in one round rather than several.
+
+### Ticketmaster: Paged Facet Responses
+
+Added while chasing the above, and kept because it is correct: ISMDS can page its facets and the scan read page one and stopped. The live event turned out not to page (`no page block; 1429 on this page`), so this was **not** the cause of the missing sections — but an event that does page would have lost everything after the first response. The scan now follows `_links.next`, merging facets and their embedded offers (a facet whose offer stayed behind would be stored priceless), stops at 40 pages, and keeps what it has if a page fails.
+
+---
+
 ## October 15, 2026 — v3.0.6
 
 ### Section Filter

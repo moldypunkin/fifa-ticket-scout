@@ -1244,6 +1244,10 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
   const seats = {};
   let missingPrice = 0;
   const offerSpread = [];
+  // Listings with a count but no published places — see the block below.
+  let unplacedSeats = 0;
+  let unplacedSeq = 0;
+  const unplacedSections = new Set();
   try {
     for (const facet of facetsData.facets) {
       if (facet.available === false) continue;
@@ -1288,12 +1292,14 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
       const price = dollars != null ? Math.round(dollars * 1000) : null;
       if (price == null) missingPrice++;
 
+      let placedHere = 0;
       for (const compressed of facet.places || []) {
         for (const placeId of expandPlaces(compressed)) {
           const parsed = decodePlaceId(placeId);
           if (!parsed) continue;
           const block = String(parsed.section || facet.section || "");
           const row = String(parsed.row || "");
+          placedHere++;
           seats[placeId] = {
             block,
             row,
@@ -1310,12 +1316,91 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
           };
         }
       }
+
+      // Resale listings publish a section and a count and nothing else:
+      //
+      //   {"available":true,"inventoryTypes":["resale"],"seating":"reserved",
+      //    "section":"3","count":2,"places":[]}
+      //
+      // 867 of them on one Nebraska event, which is why section 206 was on the
+      // map with a $1,005.70 listing and absent from the dashboard. Store the
+      // count as seats with no row or seat number rather than dropping them:
+      // unnumbered seats already group as "N together, adjacency unknown"
+      // everywhere else in the popup.
+      if (!placedHere) {
+        const block = String(facet.section || "");
+        const count = Math.max(1, Math.min(Number(facet.count) || 1, 200));
+        if (block) {
+          // The offer id keeps two listings in the same section apart; without
+          // it the second would overwrite the first.
+          const offerKey = (Array.isArray(facet.offers) && facet.offers[0]) || `f${unplacedSeq++}`;
+          for (let i = 0; i < count; i++) {
+            seats[`unplaced:${block}:${offerKey}:${i}`] = {
+              block,
+              row: "",
+              seat: "",
+              area,
+              category,
+              tier: VenueTiers.tierFor(venueName, block, ""),
+              price,
+              exclusive: true,
+              site: "ticketmaster",
+              accessible: (facet.accessibility || []).length > 0,
+              attributes: facet.attributes || [],
+            };
+          }
+          unplacedSeats += count;
+          unplacedSections.add(block);
+        }
+      }
     }
   } catch (error) {
     bgLog("[background] Error parsing Ticketmaster facets:", error.message);
   }
 
   const total = Object.keys(seats).length;
+
+  // Which sections actually made it through, and which facets produced no seat
+  // at all. A facet only becomes seats via its `places` list, so one with no
+  // places — or places that do not decode — vanishes without a word. That is
+  // how a Nebraska resale event showed 1,739 seats while section 206, plainly
+  // on the map, was missing from the dashboard.
+  try {
+    const sectionsIn = new Set();
+    const emptyFacets = [];
+    for (const f of facetsData.facets) {
+      if (f && f.section != null && f.section !== "") sectionsIn.add(String(f.section));
+      const places = Array.isArray(f && f.places) ? f.places : [];
+      let decoded = 0;
+      for (const compressed of places) {
+        for (const placeId of expandPlaces(compressed)) {
+          if (decodePlaceId(placeId)) decoded++;
+        }
+      }
+      if (!decoded) emptyFacets.push(f);
+    }
+    const sectionsOut = new Set(Object.values(seats).map((x) => x.block).filter(Boolean));
+    const missing = [...sectionsIn].filter((x) => !sectionsOut.has(x)).sort();
+    bgLog(`[background] Ticketmaster sections: ${sectionsIn.size} in the response, ` +
+      `${sectionsOut.size} produced seats` +
+      (missing.length ? `, ${missing.length} produced none: ${missing.slice(0, 40).join(", ")}` : ""));
+    if (emptyFacets.length) {
+      bgLog(`[background] Ticketmaster: ${emptyFacets.length} listing(s) published no seat ` +
+        `places — ${unplacedSeats} seat(s) across ${unplacedSections.size} section(s) kept ` +
+        `from their counts instead, with no row or seat number`);
+      // A listing with no section at all cannot be filed anywhere, so it stays
+      // dropped — but it is still inventory the dashboard is not showing.
+      const stillMissing = emptyFacets
+        .filter((f) => !String((f && f.section) || ""));
+      if (stillMissing.length) {
+        bgLog(`[background] Ticketmaster: ${stillMissing.length} listing(s) had no section ` +
+          `either and are still dropped`);
+      }
+    }
+  } catch (e) {
+    bgLog("[background] Ticketmaster: section census failed: " + (e && e.message));
+  }
+
   // Why a price can be wrong, reported once per scan.
   //
   // Two candidates, and only the payload distinguishes them: `listPriceRange`
