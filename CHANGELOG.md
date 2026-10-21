@@ -4,6 +4,36 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## October 21, 2026 — v3.1.0
+
+### Best Value Tab
+
+A fourth tab, beside Scanner, Insights and Alerts. The cheapest list answers "what costs least"; this one answers "what is cheap for what it is". Section 613 at $97 is not a find if $97 is what 613 costs; section 206 at $1,005 is one when the rest of 206 is $1,340.
+
+**Peers, on a ladder.** Every listing is scored against comparable listings, taken from the first rung with at least four of them:
+
+1. other listings in the same section
+2. other listings in the same curated tier (your venue categories)
+3. the rest of the event
+
+The comparison is against the **median**, never the average: one $3,000 listing would otherwise drag a section's baseline up and make everything around it look like a bargain. Each row states which rung was used and how many listings it was measured against — four peers and forty are not the same evidence, and a score cannot say that on its own.
+
+**Three signals, each explained in words:**
+
+- *Under its peers* — "25% under section 206 (median $1,345)"
+- *Group value* — "4 together at $142.00 each — smaller groups here go for $186.00". Never the cheapest line, so a price sort cannot surface it.
+- *Row advantage* — "cheaper than 5 listings further back (median $151.00)". Skipped where rows are unknown: a blank row must not read as row 0 and turn every listing into a front-row find.
+
+**Why a listing might be cheap is shown, not subtracted:** obstructed view, accessible seating, no row given, adjacency unknown. A half-price obstructed seat may be exactly what someone wants, but they should know before they click.
+
+**No threshold**, by choice: the list is ranked and the gap is stated, so on an evenly priced event the top entry reads "0% under" rather than being dressed up as a find.
+
+Writing `tests/deal-score-check.js` caught two bugs in the scorer before it shipped: prices were converted twice (buildAllClusters has already run centsToUSD, so every price came out as $1.005 and the ranking still looked plausible), and the tier rung never fired because tiers live on the seats rather than on the cluster. 45 suites.
+
+This is a first cut and the weighting is expected to be revisited.
+
+---
+
 ## October 20, 2026 — v3.0.7
 
 ### Ticketmaster: Resale Listings That Publish No Seats

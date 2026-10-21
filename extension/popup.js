@@ -30,6 +30,7 @@ document.addEventListener("DOMContentLoaded", () => {
       document.querySelectorAll(".tab-panel").forEach((p) => {
         p.style.display = p.id === `tab-${target}` ? "" : "none";
       });
+      if (target === "deals") renderDealsTab();
       if (target === "alerts") renderAlertsTab();
       if (target === "insights") renderInsightsTab();
     });
@@ -490,6 +491,257 @@ function showEmpty(detected) {
     }
     scanningHelp.style.display = "none";
   }
+}
+
+// ─── Best value ──────────────────────────────────────────────────────────
+// A deal is not the cheapest ticket — it is a ticket that is cheap FOR WHAT IT
+// IS. Section 206 at $1,005 is a deal when the rest of 206 is $1,340; section
+// 613 at $97 is not, if that is simply what 613 costs.
+//
+// Every listing is scored against its PEERS, found on a ladder:
+//
+//   1. other listings in the same section
+//   2. other listings in the same curated tier (your venue categories)
+//   3. the rest of the event
+//
+// The first rung with enough listings wins. The comparison is against the
+// MEDIAN peer price, never the average: one $3,000 listing in a section would
+// otherwise make everything around it look like a bargain.
+const DEAL_MIN_PEERS = 4;        // below this a median says nothing
+const DEAL_MAX_RESULTS = 25;
+
+function median(values) {
+  if (!values.length) return null;
+  const v = values.slice().sort((a, b) => a - b);
+  const mid = Math.floor(v.length / 2);
+  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+}
+
+// Per-seat price in dollars, fees included. buildAllClusters has already run
+// centsToUSD, so this is the figure the popup prints — converting again would
+// divide every price by a thousand and the ranking would still look plausible.
+function dealPrice(cluster) {
+  return cluster.price;
+}
+
+// The curated tier, which lives on the seats rather than the cluster.
+function dealTier(cluster) {
+  const seat = (cluster.seats && cluster.seats[0]) || {};
+  return seat.tier || "";
+}
+
+// Peers on the first rung of the ladder that has enough listings to compare
+// against. Returns what was used, so the reason can say so.
+function dealPeers(cluster, clusters) {
+  const notMe = (c) => c !== cluster;
+  const sameSection = clusters.filter((c) => notMe(c) && c.block === cluster.block);
+  if (sameSection.length >= DEAL_MIN_PEERS) {
+    return { peers: sameSection, scope: "section", label: `section ${cluster.block}` };
+  }
+  const myTier = dealTier(cluster);
+  const sameTier = myTier
+    ? clusters.filter((c) => notMe(c) && dealTier(c) === myTier)
+    : [];
+  if (sameTier.length >= DEAL_MIN_PEERS) {
+    return { peers: sameTier, scope: "tier", label: myTier };
+  }
+  const rest = clusters.filter(notMe);
+  return { peers: rest, scope: "event", label: "this event" };
+}
+
+// "4 together for less per seat than the pairs around it" — the case a plain
+// price sort cannot show, because the 4 is never the cheapest line.
+function dealGroupEdge(cluster, peers) {
+  const mine = cluster.together != null ? cluster.together : cluster.count;
+  if (!mine || mine < 2) return null;
+  const smaller = peers.filter((c) => {
+    const n = c.together != null ? c.together : c.count;
+    return n && n < mine;
+  });
+  if (smaller.length < DEAL_MIN_PEERS) return null;
+  const smallerMedian = median(smaller.map(dealPrice));
+  const price = dealPrice(cluster);
+  if (smallerMedian == null || price >= smallerMedian) return null;
+  return {
+    smallerMedian,
+    saving: smallerMedian - price,
+    pct: (smallerMedian - price) / smallerMedian,
+    groupSize: mine,
+  };
+}
+
+// Cheaper than listings FURTHER FROM THE FIELD in the same section. Only
+// meaningful where rows are numbered: much of the resale inventory has no row
+// at all, and a missing row must not read as row 0.
+function dealRowEdge(cluster, peers) {
+  const myRow = parseInt(String(cluster.row || "").trim(), 10);
+  if (!isFinite(myRow)) return null;
+  const behind = peers.filter((c) => {
+    const r = parseInt(String(c.row || "").trim(), 10);
+    return isFinite(r) && r > myRow && c.block === cluster.block;
+  });
+  if (behind.length < DEAL_MIN_PEERS) return null;
+  const behindMedian = median(behind.map(dealPrice));
+  const price = dealPrice(cluster);
+  if (behindMedian == null || price >= behindMedian) return null;
+  return { behindMedian, saving: behindMedian - price, rows: behind.length };
+}
+
+// What a listing's own attributes say about why it might be cheap. Shown, not
+// subtracted: an obstructed seat at half price may be exactly what someone
+// wants, but they should know before they click.
+function dealCaveats(cluster) {
+  const seat = (cluster.seats && cluster.seats[0]) || {};
+  const out = [];
+  if (seat.accessible) out.push("accessible seating");
+  const attrs = Array.isArray(seat.attributes) ? seat.attributes : [];
+  for (const a of attrs) {
+    const text = String(a && (a.name || a.description || a) || "").trim();
+    if (text && /obstruct|limited|partial|restrict|behind|side ?view/i.test(text)) {
+      out.push(text.toLowerCase());
+    }
+  }
+  if (!cluster.row) out.push("no row given");
+  if (cluster.together == null || cluster.together < 2) {
+    // Only worth saying on a multi-seat line, where it is a real limitation.
+    if (cluster.count > 1) out.push("adjacency unknown");
+  }
+  return out;
+}
+
+// One score per listing, plus the sentences that explain it. No threshold:
+// the list is ranked and the gap is stated, so a weak best-of is visibly weak
+// rather than hidden.
+function scoreDeals(seats) {
+  const clusters = buildAllClusters(seats).filter((c) => c.price != null);
+  if (clusters.length < 2) return [];
+
+  const scored = [];
+  for (const cluster of clusters) {
+    const { peers, scope, label } = dealPeers(cluster, clusters);
+    if (!peers.length) continue;
+    const peerMedian = median(peers.map(dealPrice));
+    if (peerMedian == null || peerMedian <= 0) continue;
+
+    const price = dealPrice(cluster);
+    const saving = peerMedian - price;
+    const pct = saving / peerMedian;
+
+    const group = dealGroupEdge(cluster, peers);
+    const row = dealRowEdge(cluster, peers);
+
+    // The headline discount carries the score; the group and row edges add to
+    // it, so a 4-together that also undercuts its section outranks a single
+    // seat with the same discount.
+    let score = pct * 100;
+    if (group) score += group.pct * 40;
+    if (row) score += 10;
+    // A section with five listings is a weaker statement than one with fifty.
+    const confidence = Math.min(1, peers.length / 12);
+    score *= 0.6 + 0.4 * confidence;
+
+    const reasons = [];
+    if (saving > 0) {
+      reasons.push(`${Math.round(pct * 100)}% under ${label} ` +
+        `(median $${formatPrice(peerMedian)})`);
+    } else {
+      reasons.push(`$${formatPrice(-saving)} over the ${label} median`);
+    }
+    if (group) {
+      reasons.push(`${group.groupSize} together at $${formatPrice(price)} each — ` +
+        `smaller groups here go for $${formatPrice(group.smallerMedian)}`);
+    }
+    if (row) {
+      reasons.push(`cheaper than ${row.rows} listings further back ` +
+        `(median $${formatPrice(row.behindMedian)})`);
+    }
+
+    scored.push({
+      cluster, score, price, peerMedian, saving, pct, scope, label,
+      peerCount: peers.length, group, row, reasons,
+      caveats: dealCaveats(cluster),
+    });
+  }
+
+  scored.sort((a, b) => b.score - a.score || b.saving - a.saving);
+  return scored.slice(0, DEAL_MAX_RESULTS);
+}
+
+function renderDealsTab() {
+  const container = document.getElementById("dealsContent");
+  if (!container) return;
+
+  chrome.storage.local.get(null, (data) => {
+    const games = (data && data.games) || {};
+    const key = currentPerfId || Object.keys(games)[0];
+    const game = games[key];
+    const seats = game
+      ? Object.values(game.seats || {}).filter((s) => s.exclusive !== false && s.price != null)
+      : [];
+
+    if (seats.length < 2) {
+      container.innerHTML = `
+        <div class="deals-empty">
+          <p class="deals-empty-title">Nothing to compare yet</p>
+          <p class="deals-empty-hint">Capture an event on the Scanner tab and its best
+          value listings appear here.</p>
+        </div>`;
+      return;
+    }
+
+    const deals = scoreDeals(seats);
+    if (!deals.length) {
+      container.innerHTML = `
+        <div class="deals-empty">
+          <p class="deals-empty-title">No comparison possible</p>
+          <p class="deals-empty-hint">This event has too few listings to say what is
+          cheap for what it is.</p>
+        </div>`;
+      return;
+    }
+
+    // Said plainly: this is a ranking, not a verdict. On an evenly priced event
+    // the top entry may be barely under its peers, and the gap shown says so.
+    const head = `
+      <div class="deals-head">
+        <span class="deals-head-title">Best value</span>
+        <span class="deals-head-note">${deals.length} listing${deals.length !== 1 ? "s" : ""},
+        ranked by how far under comparable seats they sit</span>
+      </div>`;
+
+    const rows = deals.map((d, i) => {
+      const c = d.cluster;
+      const together = c.together != null ? c.together : c.count;
+      const where = [
+        `Block ${c.block}`,
+        c.row ? `Row ${c.row}` : null,
+        together > 1 ? `${together} together` : (c.count > 1 ? `${c.count} seats` : "single seat"),
+      ].filter(Boolean).join(" · ");
+      const pctClass = d.pct >= 0.25 ? "deal-pct-strong" : d.pct > 0 ? "deal-pct" : "deal-pct-none";
+      const pctText = d.pct > 0 ? `-${Math.round(d.pct * 100)}%` : "—";
+      const caveats = d.caveats.length
+        ? `<div class="deal-caveats">${d.caveats.join(" · ")}</div>`
+        : "";
+      // The peer count is shown because four listings and forty are not the
+      // same evidence, and the ranking cannot say that on its own.
+      return `
+        <div class="deal-row">
+          <div class="deal-rank">${i + 1}</div>
+          <div class="deal-main">
+            <div class="deal-where">${where}</div>
+            <div class="deal-why">${d.reasons.join("<br>")}</div>
+            <div class="deal-peers">compared with ${d.peerCount} listing${d.peerCount !== 1 ? "s" : ""} in ${d.label}</div>
+            ${caveats}
+          </div>
+          <div class="deal-figures">
+            <div class="deal-price">$${formatPrice(d.price)}</div>
+            <div class="${pctClass}">${pctText}</div>
+          </div>
+        </div>`;
+    }).join("");
+
+    container.innerHTML = head + `<div class="deals-list">${rows}</div>`;
+  });
 }
 
 // ─── Section filter ──────────────────────────────────────────────────────

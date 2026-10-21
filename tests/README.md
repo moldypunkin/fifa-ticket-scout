@@ -38,6 +38,10 @@ passed while the extension misbehaved.
 | `evenue-parse-check` | Evenue's positional rows, mapped by header name |
 | `evenue-schools-check` | every Evenue school end to end, each against its own captured payload — Paciolan builds differ per school, so this is what stops a fix for one denting another |
 | `tm-audit-check` | Ticketmaster price resolution and the cheapest-seat audit |
+| `tm-unplaced-facets-check` | resale listings that publish a section and a count but no seat places — 867 of them on one event, dropped in silence until this |
+| `tm-facets-pagination-check` | following ISMDS page links, and keeping what was fetched when a page fails |
+| `section-filter-check` | the section filter box: matching rules, and that it runs before every renderer |
+| `deal-score-check` | the Best Value ranking: the peer ladder, median baselines, group and row edges, and the caveats shown rather than subtracted |
 | `probe-format-check` | discovery probe output format and log-relay tagging |
 
 Suites for the SeatGeek/StubHub/TickPick parsers were lost with the scratch

@@ -2780,3 +2780,115 @@ body {
 }
 
 .section-filter-info.no-match { color: #c0392b; }
+
+/* ─── Best value tab ─────────────────────────────────────────────────────
+   A ranking, not a verdict: every row states the gap and what it was measured
+   against, so a weak best-of reads as weak rather than as a find. */
+.deals-head {
+  padding: 14px 14px 8px;
+  border-bottom: 1px solid var(--border, #e6eaf4);
+}
+
+.deals-head-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a2a4f;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.deals-head-note {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: #6b7a9e;
+}
+
+.deals-list { padding: 4px 0 10px; }
+
+.deal-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #f0f3fa;
+}
+
+.deal-rank {
+  flex: 0 0 20px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #9aa6c2;
+  padding-top: 1px;
+}
+
+.deal-main { flex: 1; min-width: 0; }
+
+.deal-where {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1a2a4f;
+}
+
+.deal-why {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #46557d;
+}
+
+.deal-peers {
+  margin-top: 2px;
+  font-size: 10px;
+  color: #93a0bd;
+}
+
+.deal-caveats {
+  margin-top: 3px;
+  font-size: 10px;
+  color: #b07a28;
+}
+
+.deal-figures {
+  flex: 0 0 auto;
+  text-align: right;
+}
+
+.deal-price {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a3d8f;
+}
+
+.deal-pct-strong {
+  font-size: 11px;
+  font-weight: 700;
+  color: #1b7a44;
+}
+
+.deal-pct {
+  font-size: 11px;
+  color: #3f8f63;
+}
+
+.deal-pct-none {
+  font-size: 11px;
+  color: #9aa6c2;
+}
+
+.deals-empty { padding: 36px 20px; text-align: center; }
+
+.deals-empty-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a2a4f;
+  margin: 0 0 6px;
+}
+
+.deals-empty-hint {
+  font-size: 11px;
+  color: #6b7a9e;
+  margin: 0;
+  line-height: 1.5;
+}
