@@ -1943,64 +1943,22 @@ function exportCSV() {
 
     const activeId = currentPerfId || Object.keys(data.games)[0];
     const game = data.games[activeId];
-    if (!game) return;
+    // The file itself is built in csv-export.js, which the background's
+    // auto-pull shares, so both always write the same format.
+    const out = buildScoutCsv(game, {
+      gameKey: activeId,
+      now: new Date(),
+      priceUSD: centsToUSD,
+      tierFor: VenueTiers.tierFor,
+      fileTag: siteFileTag,
+    });
+    if (!out) return;
 
-    const seats = Object.values(game.seats || {}).filter(s => s.exclusive !== false && s.price != null);
-    if (seats.length === 0) return;
-
-    const match = game.match;
-    const now = new Date();
-    const exportTime = now.toISOString();
-
-    const meta = [
-      `# Match: ${match?.name || "Unknown"}`,
-      `# Date: ${match?.date || "Unknown"}`,
-      // Only FIFA folds the venue into `name`; Ticketmaster keeps it separate,
-      // so surface it rather than losing it from the export.
-      ...(match?.venue ? [`# Venue: ${match.venue}`] : []),
-      `# Currency: ${match?.currency || "USD"}`,
-      `# Site: ${game.site || "resale"}`,
-      `# Performance ID: ${game.match?.performanceId || activeId}`,
-      `# Exported: ${exportTime}`,
-      `# Total Seats: ${seats.length}`,
-    ];
-
-    // Seat_Range carries StubHub listings whose seats could not be enumerated
-    // (e.g. 3 tickets across 13-18). Empty for every other site and for rows
-    // that do have a seat number.
-    // Tier is the cross-site seating band from tiers.js. On the FIFA sites
-    // Category is the real CAT 1/2/3/4 and Tier sits alongside it; on the
-    // marketplaces Category is a constant and Tier is the useful column.
-    const header = "Block,Area,Row,Seat,Seat_Range,Category,Tier,Price_USD,Exclusive";
-    const rows = seats
-      .sort((a, b) =>
-        a.price - b.price
-        || a.block.localeCompare(b.block, undefined, { numeric: true })
-        || a.row.localeCompare(b.row, undefined, { numeric: true })
-        || a.seat.localeCompare(b.seat, undefined, { numeric: true })
-      )
-      .map((s) => {
-        const area = s.area.includes(",") ? `"${s.area}"` : s.area;
-        // Recomputed, not read from s.tier — see renderCategorySections: the
-        // stored value is a scan-time snapshot and goes stale when the shipped
-        // venue mapping changes.
-        const tier = VenueTiers.tierFor(match?.venue, s.block, s.row);
-        const tierCell = tier.includes(",") ? `"${tier}"` : tier;
-        return `${s.block},${area},${s.row},${s.seat},${s.seatRange || ""},${s.category},${tierCell},${centsToUSD(s.price).toFixed(2)},${s.exclusive}`;
-      });
-
-    const csv = [...meta, "", header, ...rows].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
+    const blob = new Blob([out.csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
-
-    const matchName =
-      game.match?.name?.replace(/[^a-zA-Z0-9]/g, "_") || "seats";
-    const ts = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}_${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}`;
     const a = document.createElement("a");
     a.href = url;
-    // Site first: exports from several sites for the same match then sort
-    // together by source rather than interleaving.
-    a.download = `${siteFileTag(game.site)}_${matchName}_${ts}.csv`;
+    a.download = out.filename;
     a.click();
     URL.revokeObjectURL(url);
   });

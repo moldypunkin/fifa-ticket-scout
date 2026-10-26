@@ -168,6 +168,17 @@ function safeSendMessage(message) {
   }
 }
 
+// ─── Auto-pull marker (#ts-auto) ──────────────────────────────────────────
+// TicketPortal's "⇣ Pull" opens a page with #ts-auto on the address. Tell the
+// background now, at document_start, BEFORE this script relays any listing
+// traffic — the background starts this page's seats from empty on the first
+// save after arming, so arming late would drop the first batch. The fragment
+// never reaches the site's server.
+(function armAutoPull() {
+  if (!/(^|[#&])ts-auto(&|=|$)/.test(location.hash)) return;
+  safeSendMessage({ type: "AUTO_PULL_ARM", url: location.href });
+})();
+
 // Listen for messages from injected code
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;

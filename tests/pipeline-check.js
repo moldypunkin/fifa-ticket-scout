@@ -5,7 +5,7 @@ const fs = require("fs");
 const dir = EXT;
 const read = (f) => fs.readFileSync(dir + f, "utf8");
 const injected = read("injected.js"), content = read("content.js");
-const bg = read("background.js"), popup = read("popup.js");
+const bg = read("background.js"), popup = read("popup.js"), csvExport = read("csv-export.js");
 
 let fail = 0;
 const check = (label, cond, detail) => {
@@ -27,7 +27,7 @@ check("only writes when name present", /if \(eventInfo && eventInfo\.name\)/.tes
 
 console.log("\n--- consumers ---");
 check("popup venue falls back to match.venue", /parts\[3\] \|\| match\.venue \|\| ""/.test(popup));
-check("CSV emits Venue line when present", /match\?\.venue \? \[`# Venue: \$\{match\.venue\}`\]/.test(popup));
+check("CSV emits Venue line when present", /m\.venue \? \[`# Venue: \$\{m\.venue\}`\]/.test(csvExport));
 check("no other processApiResponse callers", (bg.match(/processApiResponse\(/g) || []).length === 2,
   `${(bg.match(/processApiResponse\(/g) || []).length} occurrence(s) incl. definition`);
 

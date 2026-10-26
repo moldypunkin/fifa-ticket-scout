@@ -105,8 +105,10 @@ ctx.saveTicketsForLessSeats(EVENT_ID, BODY, 1, "ticketsforless", null).then(() =
   // The portal maps its source tag off the "# Site:" line in the CSV header,
   // which reads game.site and falls back to "resale" when it is unset.
   check("game.site recorded", game.site === "ticketsforless", String(game.site));
+  // The CSV is built in csv-export.js, shared by the popup and the auto-pull.
+  const csvSrc = fs.readFileSync(EXT + "csv-export.js", "utf8");
   const popupSrc = fs.readFileSync(EXT + "popup.js", "utf8");
-  check("the export writes it", /# Site: \$\{game\.site \|\| "resale"\}/.test(popupSrc));
+  check("the export writes it", /# Site: \$\{game\.site \|\| "resale"\}/.test(csvSrc));
   check("the filename tag is ticketsforless", /ticketsforless: "ticketsforless"/.test(popupSrc));
 
   console.log("");

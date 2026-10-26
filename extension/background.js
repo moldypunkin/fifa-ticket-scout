@@ -5,7 +5,7 @@
 // scripts with no deps, so importScripts is safe at service-worker top level.
 // NOTE: VenueTiers is about SEAT tiers; the TIERS constant below is LICENSE
 // tiers. Different things.
-importScripts("venue-tiers.js", "tiers.js", "venue-import.js");
+importScripts("venue-tiers.js", "tiers.js", "venue-import.js", "csv-export.js");
 
 // The shipped mapping, before any user import overlays it.
 const SHIPPED_VENUE_TIER_DATA = self.VENUE_TIER_DATA;
@@ -534,6 +534,222 @@ function notifyDataUpdated() {
 const tabGameMap = {};
 const scanStartTimes = {};
 
+// ==== auto-pull (TicketPortal "⇣ Pull") — BEGIN ===========================
+// A person clicks ⇣ Pull in TicketPortal; the portal opens the marketplace page
+// with "#ts-auto" on the address. content.js sees the marker and arms this tab.
+// We then wait until the page's listings have FINISHED arriving, write the same
+// CSV the popup's Download button writes, and close the tab. The portal is
+// watching the downloads folder and opens its import from there.
+//
+// Deliberately one human click per page: nothing here opens tabs, loops over
+// events or runs on a timer of its own. The marker only arms a tab a person
+// just opened.
+//
+// THE RULE THAT MATTERS: never download a file that might be partial. The
+// portal treats a file as the whole picture for that source and showtime, so a
+// half-loaded page would wipe real listings off its board. "Finished" means:
+// listings captured SINCE this tab was armed, a non-zero count, no scan in
+// progress, and the count unchanged for AUTO_STABLE_MS. If that never happens
+// within AUTO_MAX_MS we give up, leave the tab open and badge it "!" — the
+// person clicks Download CSV themselves, exactly as before.
+const AUTO_STABLE_MS = 6000;
+const AUTO_MAX_MS = 120000;
+const AUTO_POLL_MS = 1500;
+const AUTO_TM_SETTLE_MS = 2000;   // after the TM page reports loaded, before its scan starts
+const autoPull = {};              // tabId -> job; in memory, like tabGameMap
+
+// Seats merge across visits (every save path does {...old, ...new}), so a
+// stored event still holds listings seen on an EARLIER visit, some long sold.
+// An auto-pull must export only what THIS page load showed, so the first save
+// for its event after arming REPLACES the stored seats instead of merging.
+function mergeSeats(prev, seats, tabId, gameKey) {
+  const job = tabId != null ? autoPull[tabId] : null;
+  if (job && !job.done && job.freshFor !== gameKey) {
+    job.freshFor = gameKey;
+    return { ...seats };
+  }
+  return { ...prev, ...seats };
+}
+
+// Copies of popup.js's fee tables, file tags, price maths and TM event-id
+// parser: the service worker cannot load popup.js. tests/auto-pull-check.js
+// fails if any copy differs from the popup's, so edit both together.
+const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0, gotickets: 1.0, ticketsforless: 1.0 };
+const FEE_FLAT_BY_SITE = { resale: 0, lms: 0, ticketmaster: 0, seatgeek: 0, stubhub: 0, evenue: 5.00, tickpick: 0, axs: 0 };
+const SITE_FILE_TAGS = {
+  resale: "fifa-resale",
+  lms: "fifa-lms",
+  ticketmaster: "ticketmaster",
+  seatgeek: "seatgeek",
+  stubhub: "stubhub",
+  evenue: "evenue",
+  tickpick: "tickpick",
+  axs: "axs",
+  vividseats: "vividseats",
+  gametime: "gametime",
+  gotickets: "gotickets",
+  ticketsforless: "ticketsforless",
+};
+
+function siteFileTag(site) {
+  const known = SITE_FILE_TAGS[site];
+  if (known) return known;
+  // An unrecognised site still names itself rather than going anonymous.
+  const cleaned = String(site || "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return cleaned || "unknown-site";
+}
+
+// popup.js's centsToUSD, with the site and the event's own fee table passed in
+// instead of read from the popup's currentSite / currentFees.
+function feeUSD(cents, site, fees) {
+  const multiplier = FEE_MULTIPLIER_BY_SITE[site] ?? 1.15;
+  const base = cents / 1000;
+  if (fees && typeof fees === "object") return base * (1 + (fees.pct || 0) / 100) + (fees.flat || 0);
+  const flat = FEE_FLAT_BY_SITE[site] ?? 0;
+  return base * multiplier + flat;
+}
+
+const TM_EVENT_ID_RE = /\/event\/([A-Za-z0-9_-]{8,})/;
+const TM_AM_EVENT_ID_RE = /\/buy\/[a-z]+\/([A-Za-z0-9+=_%-]{6,})/i;
+function ticketmasterEventIdFromUrl(url) {
+  if (!/ticketmaster\.com/.test(url)) return null;
+  const path = url.match(TM_EVENT_ID_RE);
+  if (path) return path[1];
+  if (/(^|\/\/|\.)am\.ticketmaster\.com/i.test(url)) {
+    const am = url.match(TM_AM_EVENT_ID_RE);
+    if (am) return decodeURIComponent(am[1]);
+  }
+  for (const key of ["eventId", "event_id", "eventid", "id", "event"]) {
+    const m = url.match(new RegExp("[?&]" + key + "=([A-Za-z0-9_-]{8,})(?:[&#]|$)", "i"));
+    if (m) return m[1];
+  }
+  return null;
+}
+
+// Is the page done? Pure, so tests/auto-pull-check.js can pin every gate.
+// job: { armedAt, freshFor, scanStatus, lastCount, stableSince }
+// Returns "wait", "export" or the reason to give up.
+function autoPullVerdict(job, gameKey, count, now) {
+  if (now - job.armedAt > AUTO_MAX_MS) {
+    return count > 0 ? "the page never settled" : "no listings were captured";
+  }
+  if (job.scanStatus === "error") return "the scan reported an error";
+  if (!gameKey || job.freshFor !== gameKey) return "wait";   // nothing from THIS load yet
+  if (job.scanStatus === "scanning") return "wait";
+  if (!(count > 0)) return "wait";
+  if (job.lastCount !== count) return "wait";
+  if (now - job.stableSince < AUTO_STABLE_MS) return "wait";
+  return "export";
+}
+
+// Which stored event is this pull collecting? The one this page's seats were
+// first saved under (mergeSeats records it), NOT tabGameMap alone: that entry
+// is wiped on every tabs.onUpdated "loading", and Chrome reports one for a
+// same-page address tidy-up too. SeatGeek strips "?dd_referrer=" after its
+// bot check that way, two seconds AFTER its listings landed, so a pull reading
+// tabGameMap lost its event and waited for ever (2026-10-26). Pure, tested.
+function autoPullGameKey(job, mapped) {
+  return (job && job.freshFor) || mapped || null;
+}
+
+function exportableCount(game) {
+  if (!game) return 0;
+  return Object.values(game.seats || {}).filter((s) => s.exclusive !== false && s.price != null).length;
+}
+
+function autoBadge(tabId, text, title) {
+  try {
+    chrome.action.setBadgeText({ tabId, text });
+    chrome.action.setBadgeBackgroundColor({ tabId, color: text === "!" ? "#b45309" : "#475569" });
+    if (title) chrome.action.setTitle({ tabId, title });
+  } catch (e) { /* a badge must never break the pull */ }
+}
+
+function autoPullArm(tabId, url) {
+  if (tabId == null) return;
+  autoPull[tabId] = {
+    armedAt: Date.now(), url: url || "", freshFor: null, scanStatus: null,
+    lastCount: -1, stableSince: Date.now(), scanStarted: false, loadedAt: null, done: false,
+  };
+  bgLog(`[auto-pull] armed tab ${tabId}: ${url}`);
+  autoBadge(tabId, "⇣", "Ticket Scout: waiting for the listings to finish loading, then downloading the CSV");
+  setTimeout(() => autoPullTick(tabId), AUTO_POLL_MS);
+}
+
+function autoPullGiveUp(tabId, why) {
+  const job = autoPull[tabId];
+  if (job) job.done = true;
+  bgLog(`[auto-pull] tab ${tabId}: stopped — ${why}`);
+  autoBadge(tabId, "!", `Ticket Scout did not download automatically (${why}). Open the popup and click Download CSV.`);
+}
+
+async function autoPullTick(tabId) {
+  const job = autoPull[tabId];
+  if (!job || job.done) return;
+  try {
+    // Ticketmaster only lists seats once a scan is asked for — the popup's Scan
+    // button does it by hand. Ask for exactly ONE, once the page has loaded.
+    if (!job.scanStarted) {
+      const tab = await chrome.tabs.get(tabId);
+      const eventId = tab && ticketmasterEventIdFromUrl(tab.url || "");
+      if (eventId && !/am\.ticketmaster\.com/i.test(tab.url || "")) {
+        if (tab.status === "complete" && !job.loadedAt) job.loadedAt = Date.now();
+        if (job.loadedAt && Date.now() - job.loadedAt >= AUTO_TM_SETTLE_MS) {
+          job.scanStarted = true;
+          job.scanStatus = "scanning";   // busy until the scan reports back
+          startTicketmasterScan(eventId, tabId, true);
+          bgLog(`[auto-pull] tab ${tabId}: started the Ticketmaster scan for ${eventId}`);
+        }
+      } else {
+        job.scanStarted = true;          // passive site: the page's own traffic is the data
+      }
+    }
+
+    const gameKey = autoPullGameKey(job, tabGameMap[tabId]);
+    const data = await chrome.storage.local.get("games");
+    const game = gameKey && data.games ? data.games[gameKey] : null;
+    const count = exportableCount(game);
+    const now = Date.now();
+    if (count !== job.lastCount) { job.lastCount = count; job.stableSince = now; }
+
+    const verdict = autoPullVerdict(job, gameKey, count, now);
+    if (verdict === "export") { await autoPullExport(tabId, gameKey, game); return; }
+    if (verdict !== "wait") { autoPullGiveUp(tabId, verdict); return; }
+  } catch (e) {
+    // The tab was closed, or a read failed. Closed: nothing to do. Anything
+    // else: say so rather than spin silently.
+    if (autoPull[tabId]) autoPullGiveUp(tabId, "error: " + (e && e.message ? e.message : e));
+    return;
+  }
+  setTimeout(() => autoPullTick(tabId), AUTO_POLL_MS);
+}
+
+async function autoPullExport(tabId, gameKey, game) {
+  const job = autoPull[tabId];
+  if (!job || job.done) return;
+  job.done = true;
+  const out = buildScoutCsv(game, {
+    gameKey,
+    now: new Date(),
+    priceUSD: (c) => feeUSD(c, game.site, game.fees),
+    tierFor: VenueTiers.tierFor,
+    fileTag: siteFileTag,
+    auto: true,
+  });
+  if (!out) { autoPullGiveUp(tabId, "nothing to export"); return; }
+  // A service worker has no URL.createObjectURL, so the file goes as a data:
+  // URL. No folder in the name: it lands in Chrome's download folder, which is
+  // the folder the portal watches.
+  const url = "data:text/csv;charset=utf-8," + encodeURIComponent(out.csv);
+  await chrome.downloads.download({ url, filename: out.filename, conflictAction: "uniquify", saveAs: false });
+  bgLog(`[auto-pull] tab ${tabId}: downloaded ${out.filename} (${out.count} seats) — closing the tab`);
+  delete autoPull[tabId];
+  chrome.tabs.remove(tabId).catch(() => {});
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => { delete autoPull[tabId]; });
+// ==== auto-pull — END =====================================================
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   delete tabGameMap[tabId];
   removeScannedGamesForTab(tabId);
@@ -607,33 +823,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     sendScanToTab(message.productId, message.performanceId, tabId, true);
   }
+  if (message.type === "AUTO_PULL_ARM") {
+    autoPullArm(tabId, message.url);
+  }
   if (message.type === "START_TICKETMASTER_SCAN") {
-    const eventId = message.eventId;
-    if (!eventId) return;
-    const gameKey = `ticketmaster:${eventId}`;
-    // Clear existing seats so the scan gives a fresh snapshot, matching the
-    // FIFA START_SCAN path above.
-    getStorage().then((data) => {
-      const games = data.games || {};
-      if (games[gameKey]) {
-        games[gameKey].seats = {};
-        chrome.storage.local.set({ games }, () => notifyDataUpdated());
-      }
-    });
-    const msg = {
-      type: "START_TICKETMASTER_SCAN",
-      eventId,
-      force: !!message.force,
-    };
-    if (tabId) {
-      chrome.tabs.sendMessage(tabId, msg);
-    } else {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs[0]) chrome.tabs.sendMessage(tabs[0].id, msg);
-      });
-    }
+    if (!message.eventId) return;
+    startTicketmasterScan(message.eventId, tabId, message.force);
   }
   if (message.type === "SCAN_PROGRESS") {
+    // An auto-pull must not call a page finished while its scan is running.
+    if (tabId != null && autoPull[tabId]) autoPull[tabId].scanStatus = message.status;
     // Forward progress to popup immediately (non-blocking)
     chrome.runtime.sendMessage({
       type: "SCAN_PROGRESS",
@@ -679,6 +878,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
   }
 });
+
+// Ask the tab's content script for a Ticketmaster scan. The popup's Scan button
+// reaches it through START_TICKETMASTER_SCAN; an auto-pull calls it directly.
+function startTicketmasterScan(eventId, tabId, force) {
+  const gameKey = `ticketmaster:${eventId}`;
+  // Clear existing seats so the scan gives a fresh snapshot, matching the
+  // FIFA START_SCAN path above.
+  getStorage().then((data) => {
+    const games = data.games || {};
+    if (games[gameKey]) {
+      games[gameKey].seats = {};
+      chrome.storage.local.set({ games }, () => notifyDataUpdated());
+    }
+  });
+  const msg = {
+    type: "START_TICKETMASTER_SCAN",
+    eventId,
+    force: !!force,
+  };
+  if (tabId) {
+    chrome.tabs.sendMessage(tabId, msg);
+  } else {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]) chrome.tabs.sendMessage(tabs[0].id, msg);
+    });
+  }
+}
 
 async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
   if (!body) return;
@@ -1489,7 +1715,7 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
   bgLog(`[background] Ticketmaster: ${total} seats parsed` +
     (missingPrice ? `, ${missingPrice} facets had no resolvable price` : ""));
 
-  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
   games[gameKey].site = site;
   games[gameKey].lastScanned = Date.now();
 
@@ -1604,7 +1830,7 @@ async function saveSeatGeekSeats(eventId, body, tabId, site, eventInfo) {
     (missingPrice ? `, ${missingPrice} had no price` : "") +
     (seatless ? `, ${seatless} had no seat numbers` : ""));
 
-  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
   games[gameKey].site = site;
   games[gameKey].lastScanned = Date.now();
 
@@ -1758,7 +1984,7 @@ async function saveStubHubSeats(eventId, body, tabId, site, eventInfo) {
     (missingPrice ? `, ${missingPrice} had no price` : "") +
     (seatless ? `, ${seatless} had no seat numbers` : ""));
 
-  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
   games[gameKey].site = site;
   games[gameKey].lastScanned = Date.now();
 
@@ -2616,7 +2842,7 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo, url) {
     }
   }
 
-  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
   games[gameKey].site = site;
   games[gameKey].lastScanned = Date.now();
   // The fee table usually arrives before the seats and names no event, so it is
@@ -2755,7 +2981,7 @@ async function saveTickPickSeats(eventId, body, tabId, site, eventInfo) {
     (parking ? `, ${parking} parking excluded` : "") +
     (missingPrice ? `, ${missingPrice} had no price` : ""));
 
-  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
   games[gameKey].site = site;
   games[gameKey].lastScanned = Date.now();
 
@@ -2935,7 +3161,7 @@ async function saveVividSeatsSeats(eventId, body, tabId, site, eventInfo) {
     (missingPrice ? `, ${missingPrice} had no price` : "") +
     (globalInfo.ticketCount ? `, page states ${globalInfo.ticketCount}` : ""));
 
-  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
   games[gameKey].site = site;
   games[gameKey].lastScanned = Date.now();
 
@@ -3141,7 +3367,7 @@ async function saveTicketsForLessSeats(eventId, body, tabId, site, eventInfo) {
     (parking ? `, ${parking} parking excluded` : "") +
     (missingPrice ? `, ${missingPrice} had no price` : ""));
 
-  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
   games[gameKey].site = site;
   games[gameKey].lastScanned = Date.now();
 
@@ -3403,7 +3629,7 @@ async function saveGoTicketsSeats(eventId, body, tabId, site, eventInfo) {
       `this response lists ${inResponse} ticket(s) — cannot tell from the event whether it is filtered`);
   }
 
-  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
   games[gameKey].site = site;
   games[gameKey].lastScanned = Date.now();
 
@@ -3710,7 +3936,7 @@ async function saveAxsSeats(eventId, body, tabId, site, eventInfo) {
     (missingPrice ? `, ${missingPrice} had no price` : "") +
     (Object.keys(groupNames).length ? "" : ", mapinfo not seen yet — Area from section names"));
 
-  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
   games[gameKey].site = site;
   games[gameKey].lastScanned = Date.now();
 
@@ -3948,7 +4174,7 @@ async function saveGametimeSeats(eventId, body, tabId, site, eventInfo, url) {
       `the page-side sweep requests the other lot sizes and they merge in here.`);
   }
 
-  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
   games[gameKey].site = site;
   games[gameKey].lastScanned = Date.now();
 
@@ -4104,7 +4330,7 @@ async function saveAmSeats(eventId, availability, priceData, tabId, site, eventI
     (noPrice ? `, ${noPrice} sections had no resolvable price` : "") +
     (empty ? `, ${empty} sections had none available` : ""));
 
-  games[gameKey].seats = { ...games[gameKey].seats, ...seats };
+  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
   games[gameKey].site = site;
   games[gameKey].lastScanned = Date.now();
 

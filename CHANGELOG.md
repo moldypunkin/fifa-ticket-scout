@@ -4,6 +4,35 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## October 26, 2026 — v3.2.0
+
+### Auto-Download for TicketPortal's ⇣ Pull
+
+Clicking **⇣ Pull** in TicketPortal now saves the Download CSV click. The portal opens the marketplace page with `#ts-auto` on the address (the part after `#` never reaches the site). Ticket Scout notices it, waits for the listings to finish loading, downloads the CSV and closes the tab. The portal picks the file up from the downloads folder as before, and you still press Import there.
+
+**One page per click, by design.** Nothing here opens tabs, loops over events or runs on a timer. The marker only arms a tab a person just opened, and a test fails if the auto-pull code ever opens a tab.
+
+**Never a partial file.** The portal treats a file as the whole picture for that source and showtime, so a half-loaded page would wipe real listings off its board. It downloads only when all of these hold:
+
+- listings have arrived from *this* page load;
+- the count is above zero;
+- no scan is running;
+- the count has not changed for 6 seconds.
+
+If that does not happen within 2 minutes, it stops, leaves the tab open and puts **!** on the icon. Then click Download CSV yourself, as before.
+
+**Only this visit's listings.** Stored events merge every visit's listings together, so a stored event can still hold seats seen days ago that have since sold. An auto-pull starts its event from empty on the page's first save, so it exports only what this page load showed. The popup's Download button is unchanged.
+
+**Ticketmaster** only lists seats once a scan is asked for, so the auto-pull asks for exactly one, 2 seconds after the page loads. That is the same as clicking Scan.
+
+**One CSV builder.** The file is now built in `csv-export.js`, shared by the button and the auto-pull, so the two cannot drift apart. The service worker cannot load popup.js, so it keeps copies of the fee tables, file tags and Ticketmaster event-id parser. `tests/auto-pull-check.js` fails if any copy differs from the popup's.
+
+**New permission: `downloads`.** Chrome may ask to approve it when the extension updates. The file lands in Chrome's download folder, with no subfolder in the name.
+
+Found in the first live test: SeatGeek bounces through its bot check (`?dd_referrer=`) and then tidies that out of the address without reloading, two seconds after its listings land. Chrome reports that to extensions as a new page loading, which wiped the tab's note of which event it shows, and the pull waited forever. The pull now remembers the event its seats were saved under. 46 suites.
+
+---
+
 ## October 21, 2026 — v3.1.0
 
 ### Best Value Tab
