@@ -4,6 +4,37 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## October 26, 2026 — v3.3.0
+
+### Source: Ruth Eckerd Hall (Tessitura SYOS)
+
+Twelfth source. Brought up from a live capture of performance 33816 at secure.rutheckerdhall.com, with the discovery probe armed for one round to find the endpoints.
+
+The platform is **Tessitura SYOS**, not a bespoke site, so this should carry to other Tessitura venues with little or no change. Two payloads, both captured passively:
+
+- `/api/syos/GetInitData?performanceId=<id>` — price zones, per-seat fees, and the screens on sale
+- `/api/syos/GetSeatList?...&screenId=<n>` — the seats for ONE screen (311KB, 728 seats on screen 7)
+
+Matched on `/api/syos/` rather than the two method names: SYOS ships other calls under it, the parser checks the payload shape before touching anything, and a venue on a slightly different build would otherwise be invisible.
+
+**Price is per zone, and all-in.** GetInitData gives zone 5152 as `price 83 + PerSeatFee 21`, and ZoneColorList independently prices that zone at 104. The two agreeing is why the summed figure is stored rather than assumed; storing the base would understate every seat by its fee.
+
+**Availability reads the words, not the codes.** The first capture showed `seat_status` of both -1 and 13 meaning "Unavailable", so the numbers are not a two-value flag. Only `seat_status_desc === "Available"` counts, and the 46-row hold-code table is left alone.
+
+**Sections are named from the payload's own `sections` table** — "Upper Orchestra West", not the bare id 16, which would tier as Other.
+
+**Seats arrive one screen at a time.** The page fetches only the screen being viewed, so every capture is partial by definition: screens merge into one event, re-opening one replaces rather than doubles (seat_no is unique venue-wide), and the service worker names the screens not yet opened instead of letting a partial capture look complete. Live: 56 seats on screen 6, 27 on screen 7.
+
+Ruth Eckerd Hall is not in the curated venue categories, so its tiers come from the section heuristic until it is added in TicketPortal.
+
+### The Key the Dashboard Looks Up
+
+The first version keyed the popup on both numbers in the url (`33733:33816`) while the parser used the performance id the API itself carries (`33816`). Seats were captured and stored correctly, and the dashboard looked up a key nothing had ever written: it showed nothing at all. Both sides now use the performance id; the first number is the production season (`ProductionSeasonId` in GetInitData).
+
+`tests/rutheckerd-check.js` was meant to catch exactly this and did not — it compared the two keys after stripping a prefix off one, which passed while they disagreed. It now compares them whole, with a note about why. 48 suites.
+
+---
+
 ## October 26, 2026 — v3.2.0
 
 ### Auto-Download for TicketPortal's ⇣ Pull
