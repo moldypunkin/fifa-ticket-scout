@@ -9,7 +9,7 @@
   // Three debugging rounds in this project were spent on results produced by a
   // build that had not been reloaded, which is indistinguishable from a change
   // that did not work. Compare this against what package.py prints.
-  const BUILD_STAMP = "5d97e52f";
+  const BUILD_STAMP = "b3925fbf";
   
   // Detect which ticketing site we're on
   const isTicketmaster = window.location.hostname.includes('ticketmaster.com');
@@ -171,8 +171,15 @@
               // the largest JSON the page fetched; it is 34KB of session and
               // config, and no seat ever came from it. It stays matched
               // because it is the only source for the event name and venue.
+              // /veritix/inventory/v4/<token>/price turned up on the Jimmy
+              // Carr onsale carrying offerPrices -> zonePrices -> priceLevels
+              // with label, priceLevelID, availability and prices. Matched on
+              // the directory so its siblings come too: three rounds of
+              // captures missed this family entirely because the patterns
+              // named start-flow and pre-flow specifically.
               ? ["/axsmarketplace/offers", "/axsmarketplace/mapinfo",
-                 "/axsmarketplace/eventinfo", "/veritix/start-flow/", "/veritix/pre-flow/"]
+                 "/axsmarketplace/eventinfo", "/veritix/start-flow/",
+                 "/veritix/pre-flow/", "/veritix/inventory/"]
               : ["/seatmap/", "/performance/"];
 
   // Defense-in-depth: prevent duplicate scans at the page level.
@@ -499,9 +506,12 @@
   //
   // Set to a short site tag ("EV", "SH", "SG", …) to hunt a new site's
   // inventory endpoint; null once that site is parsed.
-  // Ruth Eckerd Hall is parsed now (/api/syos/, captured passively), so
-  // nothing is in bring-up. Set this to a short site tag to map the next
-  // source; package-check.js blocks a release while it is non-null.
+  // AXS's Veritix inventory is parsed now: /veritix/inventory/V2/<token>/
+  // offer/search carries the seats and .../v4/<token>/price the price levels.
+  // Three rounds of captures missed that family because the patterns named
+  // start-flow and pre-flow specifically — the probe is what found it.
+  // Set this to a short site tag to map the next source; package-check.js
+  // blocks a release while it is non-null.
   const DISCOVERY_SITE = null;
 
   // Whether the probe is on, said out loud at load.

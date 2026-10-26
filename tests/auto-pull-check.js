@@ -119,7 +119,7 @@ const rawMerges = (bg.match(/games\[gameKey\]\.seats = \{ \.\.\.games\[gameKey\]
 const viaHelper = (bg.match(/games\[gameKey\]\.seats = mergeSeats\(games\[gameKey\]\.seats, seats, tabId, gameKey\);/g) || []).length;
 // The count rises by one with each new source; rawMerges === 0 is the part
 // that matters, and the number keeps a new save path from quietly skipping it.
-check("every save path goes through mergeSeats", rawMerges === 0 && viaHelper === 12, `${rawMerges} raw, ${viaHelper} via helper`);
+check("every save path goes through mergeSeats", rawMerges === 0 && viaHelper === 13, `${rawMerges} raw, ${viaHelper} via helper`);
 
 out("\n--- 3. one CSV builder, shared ---");
 const ctx = {};

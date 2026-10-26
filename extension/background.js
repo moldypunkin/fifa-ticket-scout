@@ -1071,6 +1071,28 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
     }
   }
 
+  // AXS Veritix inventory. Three payloads on the shop pages, all passive:
+  //
+  //   /veritix/inventory/v4/<token>/price         price per offer + price level
+  //   /veritix/inventory/V2/<token>/sections      per-section availability counts
+  //   /veritix/inventory/V2/<token>/offer/search  THE SEATS (592 on one event)
+  //
+  // This family went unseen for three rounds of captures because the patterns
+  // named start-flow and pre-flow specifically. start-flow is 1.3MB of offers,
+  // fees and parking upsells and holds no inventory at all; the seats were
+  // always one directory over.
+  if (site === "axs" && url.includes("/veritix/inventory/")) {
+    const token = axsVeritixToken(url);
+    if (!token) {
+      bgLog("[background] AXS Veritix: no token in " + url.split("?")[0]);
+    } else if (/\/price(\?|$)/i.test(url) && body && Array.isArray(body.offerPrices)) {
+      axsIndexVeritixPrices(token, body);
+    } else if (/offer\/search/i.test(url) && body && Array.isArray(body.offers)) {
+      await enforceGameLimit(`${site}:${token}`);
+      await saveAxsVeritixSeats(token, body, tabId, site, eventInfo);
+    }
+  }
+
   // TicketsForLess. One payload, captured passively:
   //
   //   GET www.ticketsforless.com/api/tickets/tfl?EventID=<id>
@@ -1157,7 +1179,10 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
       bgLog(`[background] AXS: ${path} (${size}) -> ${shape}`);
       // The shape above stops at eight keys a level, which hid everything
       // useful in the Veritix payloads. List where the arrays of records are.
-      if (/\/veritix\//.test(path)) axsLogArrays(path, body);
+      if (/\/veritix\//.test(path)) {
+        axsLogArrays(path, body);
+        axsLogOnsale(path, body);
+      }
     }
   }
 
@@ -3960,6 +3985,63 @@ function axsAttributes(listing) {
 // Veritix primary flow). Walks a payload and logs every array of objects: its
 // path, length, the first record's keys, and a few inventory-looking values
 // from it (price, section, row, seat, name...), strings capped at 40 chars.
+// What the onsale actually sells, for events with no seat map.
+//
+// The Jimmy Carr onsale at The Midland Theatre has one group, "Admission",
+// whose product carries zoneDescription "Admissions" and seatType STANDARD:
+// general admission, so there is no per-seat inventory to list and the array
+// walk above finds only offers, fees and parking upsells. Price and remaining
+// quantity on an event like that are plain fields, not arrays, so they are
+// invisible to that walk — this prints the group itself.
+const axsOnsaleLogged = new Set();
+
+function axsLogOnsale(path, body) {
+  const onsale = body && body.onsaleInformation;
+  if (!onsale || typeof onsale !== "object") return;
+  const key = path.slice(-40);
+  if (axsOnsaleLogged.has(key)) return;
+  axsOnsaleLogged.add(key);
+
+  bgLog(`[background] AXS onsale keys: ${Object.keys(onsale).join(",").slice(0, 400)}`);
+
+  const groups = Array.isArray(onsale.groups) ? onsale.groups : [];
+  groups.slice(0, 2).forEach((g, i) => {
+    // venueMapImage is a base64 jpeg of the whole map; it would bury the line.
+    const trimmed = {};
+    for (const k of Object.keys(g || {})) {
+      if (k === "venueMapImage") { trimmed[k] = "(image omitted)"; continue; }
+      trimmed[k] = g[k];
+    }
+    let shown;
+    try { shown = JSON.stringify(trimmed); } catch (e) { shown = "?"; }
+    bgLog(`[background] AXS onsale group ${i + 1}: ${String(shown).slice(0, 1500)}`);
+  });
+
+  // Anything that looks like remaining quantity or a price, wherever it sits.
+  const hits = [];
+  const walk = (node, where, depth) => {
+    if (!node || typeof node !== "object" || depth > 6 || hits.length > 30) return;
+    if (Array.isArray(node)) {
+      node.slice(0, 3).forEach((v, i) => walk(v, where + "[" + i + "]", depth + 1));
+      return;
+    }
+    for (const k of Object.keys(node)) {
+      const v = node[k];
+      if (/avail|quantity|qty|remaining|capacity|price|amount/i.test(k) &&
+          (typeof v === "number" || typeof v === "string") && String(v).length < 40) {
+        hits.push(where + "." + k + "=" + JSON.stringify(v));
+      }
+      walk(v, where + "." + k, depth + 1);
+    }
+  };
+  walk(onsale, "onsale", 0);
+  if (hits.length) {
+    bgLog(`[background] AXS onsale price/availability fields: ${hits.slice(0, 25).join(" ")}`);
+  } else {
+    bgLog(`[background] AXS onsale: no price or availability field anywhere in it`);
+  }
+}
+
 function axsLogArrays(path, body) {
   const found = [];
   const INTERESTING = /price|amount|total|fee|sect|row|seat|name|desc|avail|qty|quant|count|level|zone|area|date|venue|type|code|id$/i;
@@ -4053,6 +4135,197 @@ function axsIndexEvent(token, body) {
     date: prev.date || null,
   };
   bgLog(`[background] AXS: event identity — name=${name || "?"} venue=${venue || "?"}`);
+}
+
+// --- AXS Veritix inventory (tix.axs.com shop pages) ----------------------
+// Confirmed on the Jimmy Carr onsale at The Midland Theatre (token
+// Z4khGgAAAAABU4y2AgAAAACZ, 2027-09-20):
+//
+//   offer/search -> offers[].items[] = 592 seats
+//       sectionLabel "101"  rowLabel "8"  number  priceLevelID
+//       statusCodeLabel "Open" / "ADA" / "AXS Premium POSTED AEG"
+//       seatType, disabilityTypes, offerID
+//
+//   price -> offerPrices[].zonePrices[].priceLevels[]
+//       priceLevelID 6591 -> priceComponents [{name:"Base Component",
+//       amount:6075}, ...]  — hundredths, so 6075 is $60.75
+//
+// Three offers on this event: standard, ADA and AXS Premium, each with its own
+// prices, so the price is looked up by offer AND price level rather than price
+// level alone.
+
+// token -> { offerID -> { priceLevelID -> dollars } }
+const axsVeritixPrices = {};
+let axsVeritixPriceShapeLogged = false;
+
+// The onsale token out of a Veritix path. The same leading run the page url
+// carries and the popup keys on, so seats land where the dashboard looks.
+function axsVeritixToken(url) {
+  const m = String(url).match(/\/veritix\/[^/]+\/[^/]+\/([^/?#]+)/i);
+  if (!m) return "";
+  const token = (m[1].split("%")[0] || "").replace(/[^A-Za-z0-9_-]/g, "");
+  return token.length >= 12 ? token : "";
+}
+
+// Every component summed: "Base Component" is the face price and the rest are
+// the per-ticket fees AXS adds, so the total is what a buyer pays. Logged once
+// with the parts so the sum can be checked against the site rather than
+// trusted.
+function axsVeritixLevelPrice(level) {
+  const entry = (level && level.prices && level.prices[0]) || null;
+  if (!entry) return null;
+  const components = Array.isArray(entry.priceComponents) ? entry.priceComponents : [];
+  let hundredths = 0;
+  for (const c of components) {
+    const n = Number(c && c.amount);
+    if (isFinite(n)) hundredths += n;
+  }
+  if (!hundredths) hundredths = Number(entry.base) || 0;
+  return hundredths > 0 ? hundredths / 100 : null;
+}
+
+function axsIndexVeritixPrices(token, body) {
+  const byOffer = axsVeritixPrices[token] || (axsVeritixPrices[token] = {});
+  let levels = 0;
+  const preview = [];
+  for (const op of body.offerPrices || []) {
+    const offerID = String((op && op.offerID) || "");
+    if (!offerID) continue;
+    const map = byOffer[offerID] || (byOffer[offerID] = {});
+    for (const zp of (op.zonePrices || [])) {
+      for (const level of (zp.priceLevels || [])) {
+        const dollars = axsVeritixLevelPrice(level);
+        if (dollars == null || level.priceLevelID == null) continue;
+        map[String(level.priceLevelID)] = dollars;
+        levels++;
+        if (preview.length < 6) {
+          preview.push(`${level.label || level.priceLevelID}=$${dollars.toFixed(2)}`);
+        }
+        if (!axsVeritixPriceShapeLogged) {
+          axsVeritixPriceShapeLogged = true;
+          const parts = ((level.prices[0] || {}).priceComponents || [])
+            .map((c) => `${c.name}=${c.amount}(${c.calculationMethod || "?"})`).join(" + ");
+          bgLog(`[background] AXS Veritix: price level ${level.priceLevelID} built from ` +
+            `${parts} = $${dollars.toFixed(2)}`);
+          // The components alone read LOW: a seat shown at $34.75 rings up at
+          // $45.71 on the site, a $10.96 gap that matches a service fee plus
+          // tax. Those live in a separate fees table, keyed by id from the
+          // offer, each with its own calculation method. Print the inputs
+          // rather than guess the arithmetic: a wrong formula would misprice
+          // every seat on every AXS event and still look plausible.
+          try {
+            bgLog(`[background] AXS Veritix fees table: ` +
+              JSON.stringify(body.fees || []).slice(0, 1200));
+            bgLog(`[background] AXS Veritix offer ${offerID} fee assignments: ` +
+              JSON.stringify(op.fees || []).slice(0, 600));
+            bgLog(`[background] AXS Veritix taxes: ` +
+              JSON.stringify(body.taxes || []).slice(0, 400));
+            const lvl0 = JSON.stringify(level).slice(0, 700);
+            bgLog(`[background] AXS Veritix one whole price level: ${lvl0}`);
+          } catch (e) {
+            bgLog("[background] AXS Veritix: could not print the fee inputs: " + (e && e.message));
+          }
+        }
+      }
+    }
+  }
+  bgLog(`[background] AXS Veritix: ${levels} price level(s) across ` +
+    `${Object.keys(byOffer).length} offer(s) [${preview.join(" ")}]`);
+}
+
+async function saveAxsVeritixSeats(token, body, tabId, site, eventInfo) {
+  if (!body || !Array.isArray(body.offers)) return;
+
+  const gameKey = `${site}:${token}`;
+  const data = await getStorage();
+  const games = data.games || {};
+  if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  // tix.axs.com's own JSON-LD reads "FanSight" or the venue's name, so an
+  // indexed name from start-flow is preferred where there is one.
+  const indexed = axsEvents[token] || {};
+  const pageName = eventInfo && eventInfo.name;
+  const usablePage = pageName && !/^fansight$/i.test(pageName) &&
+    !/ - select$/i.test(pageName);
+  const prev = games[gameKey].match || {};
+  // No fallback to the page heading: "The Midland Theatre - Select" is the
+  // seat picker's own title, and storing it would read as the show's name on
+  // every Veritix event. Better an empty name the popup can fill from
+  // start-flow later than a wrong one that looks right.
+  const name = (usablePage ? pageName : null) || indexed.name || prev.name || null;
+  games[gameKey].match = {
+    name,
+    date: (eventInfo && eventInfo.date) || indexed.date || prev.date || null,
+    venue: (eventInfo && eventInfo.venue) || indexed.venue || prev.venue || null,
+    currency: "USD",
+    performanceId: token,
+  };
+
+  const venueName = games[gameKey].match && games[gameKey].match.venue;
+  logTierMapping(venueName);
+
+  const prices = axsVeritixPrices[token] || {};
+  const seats = {};
+  let missingPrice = 0;
+  const statusSeen = new Map();
+  const offerSeen = [];
+
+  for (const offer of body.offers) {
+    if (!offer || !Array.isArray(offer.items)) continue;
+    const offerID = String(offer.offerID || "");
+    const offerPrices = prices[offerID] || {};
+    offerSeen.push(`${offer.category || offerID}×${offer.items.length}`);
+
+    for (const item of offer.items) {
+      if (!item) continue;
+      const status = String(item.statusCodeLabel || "");
+      if (statusSeen.size < 12) statusSeen.set(status, (statusSeen.get(status) || 0) + 1);
+
+      const dollars = offerPrices[String(item.priceLevelID)];
+      if (dollars == null) { missingPrice++; continue; }
+
+      const block = String(item.sectionLabel || item.sectionID || "");
+      const row = String(item.rowLabel || "");
+      const attrs = [];
+      if (status && status !== "Open") attrs.push(status);
+      if (item.seatType && item.seatType !== "STANDARD") attrs.push(String(item.seatType));
+
+      // sectionID+rowID+number is unique within an offer, and the offer id
+      // keeps the ADA and premium copies of a section apart.
+      seats[`veritix:${offerID}:${item.sectionID}:${item.rowID}:${item.number}`] = {
+        block,
+        row,
+        seat: String(item.number || ""),
+        area: String(item.neighborhoodPrintDescription || ""),
+        category: String(offer.category || "standard"),
+        tier: VenueTiers.tierFor(venueName, block, row),
+        price: Math.round(dollars * 1000),
+        exclusive: true,
+        site: "axs",
+        accessible: /ADA/i.test(status) ||
+          (Array.isArray(item.disabilityTypes) && item.disabilityTypes.length > 0),
+        attributes: attrs,
+      };
+    }
+  }
+
+  const total = Object.keys(seats).length;
+  bgLog(`[background] AXS Veritix: ${total} seats from ${offerSeen.join(", ")}` +
+    (missingPrice ? `, ${missingPrice} with no price for their level` : ""));
+  if (statusSeen.size) {
+    bgLog(`[background] AXS Veritix: statusCodeLabel values: ` +
+      [...statusSeen.entries()].map((e) => `"${e[0]}"x${e[1]}`).join(", "));
+  }
+  if (missingPrice && !Object.keys(prices).length) {
+    bgLog(`[background] AXS Veritix: no price payload seen for ${token} yet — ` +
+      `/veritix/inventory/v4/<token>/price carries it`);
+  }
+
+  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
+  games[gameKey].site = site;
+  games[gameKey].lastScanned = Date.now();
+  if (tabId) tabGameMap[tabId] = gameKey;
+  await chrome.storage.local.set({ games });
 }
 
 async function saveAxsSeats(eventId, body, tabId, site, eventInfo) {

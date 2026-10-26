@@ -4,6 +4,41 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## October 26, 2026 — v3.4.0
+
+### AXS: the Veritix Seats, Found At Last
+
+The tix.axs.com shop pages have come back empty three times. Every HTTP response had been accounted for — start-flow is 1.3MB of offers, fees and parking upsells whose largest array holds 19 items, pre-flow 508KB of the same, the 169KB file from 3ddvapis is map geometry — and none of it was inventory. The working theory had moved on to a WebSocket.
+
+It was none of those. The seats are one directory over:
+
+- `/veritix/inventory/V2/<token>/offer/search` — **the seats**. 211KB, 592 standard plus 26 ADA and 11 AXS Premium on the Jimmy Carr onsale at The Midland Theatre, each with `sectionLabel`, `rowLabel`, `number`, `priceLevelID`, `statusCodeLabel` and `seatType`.
+- `/veritix/inventory/v4/<token>/price` — price per offer and price level.
+- `/veritix/inventory/V2/<token>/sections` — per-section availability counts.
+
+The whole family was invisible because MATCH_PATTERNS named `start-flow` and `pre-flow` specifically. It is now matched on the `/veritix/inventory/` directory, so its siblings come too.
+
+**Three offers price the same level differently** — standard, ADA and AXS Premium — so the price is looked up by offer AND level. By level alone a premium seat would show at the standard price. ADA seats are flagged accessible and keep their status as an attribute rather than being hidden or quietly mixed in.
+
+**The page heading is not the event name.** "The Midland Theatre - Select" is the seat picker's own title; storing it would put the venue's name where the show belongs on every Veritix event. An empty name the popup can fill from start-flow later is better than a wrong one that looks right.
+
+### Known Wrong: AXS Prices Read Low
+
+**A seat shown at $34.75 rings up at $45.71 on the site.** The price level is built from its `priceComponents`, and that is not the whole figure: the `/price` payload also carries a separate `fees` table, keyed by id from each offer, with per-fee calculation methods. That table is currently ignored, so every AXS seat is understated by its fees — a $10.96 gap on the one checked.
+
+No formula has been guessed at. Flat amounts, percentages and taxes combine differently, and a wrong one would misprice every seat on every AXS event while still looking plausible. The service worker now prints the inputs instead:
+
+```
+[background] AXS Veritix: price level <id> built from <components>
+[background] AXS Veritix fees table: ...
+[background] AXS Veritix offer <id> fee assignments: ...
+[background] AXS Veritix one whole price level: ...
+```
+
+**Picking this back up:** capture those four lines on a live AXS event together with the site's own checkout breakdown for one known seat, work out the arithmetic against that known total, then verify it on a second price level before trusting it. Until then AXS prices are low by the fees and should not be compared against other sources.
+
+---
+
 ## October 26, 2026 — v3.3.0
 
 ### Source: Ruth Eckerd Hall (Tessitura SYOS)
