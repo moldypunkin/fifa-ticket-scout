@@ -150,6 +150,7 @@ function siteFromUrl(url) {
     if (h.includes("gametime")) return "gametime";
     if (h.includes("gotickets")) return "gotickets";
     if (h.includes("ticketsforless")) return "ticketsforless";
+    if (h.includes("rutheckerdhall")) return "rutheckerd";
     if (h.includes("axs")) return "axs";
     if (h.includes("-resale-")) return "resale";
     if (h.includes("-shop-"))   return "lms";
@@ -574,7 +575,7 @@ function mergeSeats(prev, seats, tabId, gameKey) {
 // Copies of popup.js's fee tables, file tags, price maths and TM event-id
 // parser: the service worker cannot load popup.js. tests/auto-pull-check.js
 // fails if any copy differs from the popup's, so edit both together.
-const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0, gotickets: 1.0, ticketsforless: 1.0 };
+const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0, gotickets: 1.0, ticketsforless: 1.0, rutheckerd: 1.0 };
 const FEE_FLAT_BY_SITE = { resale: 0, lms: 0, ticketmaster: 0, seatgeek: 0, stubhub: 0, evenue: 5.00, tickpick: 0, axs: 0 };
 const SITE_FILE_TAGS = {
   resale: "fifa-resale",
@@ -589,6 +590,7 @@ const SITE_FILE_TAGS = {
   gametime: "gametime",
   gotickets: "gotickets",
   ticketsforless: "ticketsforless",
+  rutheckerd: "ruth-eckerd-hall",
 };
 
 function siteFileTag(site) {
@@ -1085,6 +1087,27 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
       await saveTicketsForLessSeats(eventId, body, tabId, site, eventInfo);
     } else {
       bgLog("[background] TicketsForLess: no EventID in " + url.split("?")[0]);
+    }
+  }
+
+  // Ruth Eckerd Hall - Tessitura SYOS. Two payloads, both captured passively:
+  //
+  //   /api/syos/GetInitData?performanceId=<id>   price zones, fees, screen list
+  //   /api/syos/GetSeatList?...&screenId=<n>     the seats for ONE screen
+  //
+  // Seats arrive a screen at a time: the page fetches only the screen the user
+  // opens. Each capture merges into the same event, so opening every screen
+  // builds the full picture, and the summary says how many screens are still
+  // unseen rather than letting a partial capture look complete.
+  if (site === "rutheckerd" && url.includes("/api/syos/") && body) {
+    const eventId = syosPerformanceId(url, body);
+    if (!eventId) {
+      bgLog("[background] SYOS: no performanceId in " + url.split("?")[0]);
+    } else if (url.includes("GetInitData")) {
+      syosIndexInit(eventId, body);
+    } else if (Array.isArray(body.seats)) {
+      await enforceGameLimit(`${site}:${eventId}`);
+      await saveSyosSeats(eventId, body, tabId, site, eventInfo, url);
     }
   }
 
@@ -2851,6 +2874,190 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo, url) {
     games[gameKey].fees = evenuePendingFees.get(tabId);
   }
 
+  if (tabId) tabGameMap[tabId] = gameKey;
+  await chrome.storage.local.set({ games });
+}
+
+// --- Ruth Eckerd Hall / Tessitura SYOS -----------------------------------
+// Confirmed on performance 33816 (secure.rutheckerdhall.com/33733/33816):
+// GetSeatList returned 728 seats for screen 7 alone.
+//
+//   seat_num         "34"           the seat
+//   seat_row         "T"            the row, lettered here rather than numbered
+//   section          11             an id, named by the payload's `sections`
+//   zone_no          5152           the price zone
+//   seat_status_desc "Unavailable"
+//
+// The price is per ZONE and arrives in a different payload. GetInitData's
+// Pricing gives price 83 + PerSeatFee 21 for zone 5152, and ZoneColorList
+// independently prices that zone at 104 - the two agree, so the all-in figure
+// is what gets stored rather than the base.
+//
+// Availability is read from seat_status_desc, the words, not seat_status, the
+// codes: the first capture showed -1 and 13 BOTH meaning "Unavailable", so the
+// numbers are not a two-value flag and guessing at them would either hide every
+// seat or offer sold ones.
+
+// performanceId -> { zonePrice, screens, facilityId, seenScreens }
+const syosEvents = {};
+
+function syosPerformanceId(url, body) {
+  const m = String(url).match(/[?&]performanceId=(\d+)/i);
+  if (m) return m[1];
+  const fromBody = body && (body.PerformanceId || body.performanceId);
+  return fromBody ? String(fromBody) : "";
+}
+
+// All-in price per zone. ZoneColorList already carries the summed figure;
+// Pricing carries the parts. Having both is how the sum was confirmed rather
+// than assumed, and either alone is enough to price a seat.
+function syosZonePrices(body) {
+  const out = {};
+  for (const z of (body && body.ZoneColorList) || []) {
+    if (!z || z.zone_no == null) continue;
+    const n = Number(z.price);
+    if (isFinite(n) && n > 0) out[String(z.zone_no)] = n;
+  }
+  for (const p of (body && body.Pricing) || []) {
+    if (!p || p.zone_no == null) continue;
+    const key = String(p.zone_no);
+    if (out[key] != null) continue;
+    const base = Number(p.price);
+    const fee = Number(p.PerSeatFee);
+    if (!isFinite(base) || base <= 0) continue;
+    out[key] = base + (isFinite(fee) ? fee : 0);
+  }
+  return out;
+}
+
+function syosIndexInit(eventId, body) {
+  const prices = syosZonePrices(body);
+  const screens = ((body && body.Screens) || [])
+    .filter((x) => x && x.IsAvailable !== false)
+    .map((x) => ({ id: x.ScreenId, name: String(x.ScreenDescription || "") }));
+  const prev = syosEvents[eventId] || {};
+  syosEvents[eventId] = {
+    zonePrice: Object.assign({}, prev.zonePrice, prices),
+    screens: screens.length ? screens : prev.screens || [],
+    facilityId: (body && body.FacilityId) || prev.facilityId || null,
+    seenScreens: prev.seenScreens || new Set(),
+  };
+  const preview = Object.keys(prices).sort()
+    .map((z) => `${z}=$${prices[z].toFixed(2)}`).join(" ");
+  bgLog(`[background] SYOS: ${eventId} ${Object.keys(prices).length} price zone(s) ` +
+    `[${preview}], ${screens.length} screen(s) on sale: ` +
+    screens.map((x) => `${x.id} ${x.name}`).join(", "));
+}
+
+// "Available" and nothing else. Tessitura ships a 46-row hold-code table and
+// the descriptions spell out why a seat is gone; anything not plainly available
+// is left out rather than interpreted.
+function syosIsAvailable(seat) {
+  const desc = String((seat && seat.seat_status_desc) || "").trim().toLowerCase();
+  return desc === "available";
+}
+
+async function saveSyosSeats(eventId, body, tabId, site, eventInfo, url) {
+  if (!body || !Array.isArray(body.seats)) return;
+
+  const gameKey = `${site}:${eventId}`;
+  const data = await getStorage();
+  const games = data.games || {};
+  if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  if (eventInfo && eventInfo.name) {
+    const prev = games[gameKey].match || {};
+    games[gameKey].match = {
+      name: eventInfo.name,
+      date: eventInfo.date || prev.date || null,
+      venue: eventInfo.venue || prev.venue || "Ruth Eckerd Hall",
+      currency: "USD",
+      performanceId: eventId,
+    };
+  }
+
+  const venueName = games[gameKey].match && games[gameKey].match.venue;
+  logTierMapping(venueName);
+
+  // This payload prices its own zones too, so a screen opened before
+  // GetInitData arrives is still priced.
+  const indexed = syosEvents[eventId] ||
+    { zonePrice: {}, screens: [], seenScreens: new Set() };
+  indexed.zonePrice = Object.assign({}, indexed.zonePrice, syosZonePrices(body));
+  if (!indexed.seenScreens) indexed.seenScreens = new Set();
+  syosEvents[eventId] = indexed;
+  const zonePrice = indexed.zonePrice;
+
+  // section id -> "Upper Orchestra West". The bare ids would tier as "Other".
+  const sectionNames = {};
+  for (const sec of body.sections || []) {
+    if (sec && sec.section != null) {
+      sectionNames[String(sec.section)] = String(sec.section_desc || "");
+    }
+  }
+
+  const screenId = (String(url || "").match(/[?&]screenId=(\d+)/i) || [])[1] || null;
+  if (screenId) indexed.seenScreens.add(String(screenId));
+
+  const seats = {};
+  let unavailable = 0;
+  let missingPrice = 0;
+  const statusSeen = new Map();
+
+  for (const seat of body.seats) {
+    if (!seat) continue;
+    const desc = String(seat.seat_status_desc || "").trim();
+    if (statusSeen.size < 12) statusSeen.set(desc, (statusSeen.get(desc) || 0) + 1);
+    if (!syosIsAvailable(seat)) { unavailable++; continue; }
+
+    const dollars = zonePrice[String(seat.zone_no)];
+    if (dollars == null) { missingPrice++; continue; }
+
+    const block = sectionNames[String(seat.section)] ||
+      String(seat.ZoneLabel || seat.section || "");
+    const row = String(seat.seat_row || "");
+    // seat_no is Tessitura's own id, unique across the venue: two screens
+    // cannot collide, and re-opening a screen replaces rather than doubles.
+    seats[`syos:${seat.seat_no}`] = {
+      block,
+      row,
+      seat: String(seat.seat_num || ""),
+      area: String(seat.ZoneLabel || ""),
+      category: "standard",
+      tier: VenueTiers.tierFor(venueName, block, row),
+      price: Math.round(dollars * 1000),
+      exclusive: true,
+      site: "rutheckerd",
+      accessible: false,
+      attributes: [],
+    };
+  }
+
+  const total = Object.keys(seats).length;
+  const screens = indexed.screens || [];
+  const unseen = screens.filter((x) => !indexed.seenScreens.has(String(x.id)));
+  bgLog(`[background] SYOS: ${total} available seats from ${body.seats.length} on ` +
+    `screen ${screenId || "?"}` +
+    (unavailable ? `, ${unavailable} unavailable` : "") +
+    (missingPrice ? `, ${missingPrice} in a zone with no price` : ""));
+  if (statusSeen.size) {
+    bgLog(`[background] SYOS: seat_status_desc values seen: ` +
+      [...statusSeen.entries()].map((e) => `"${e[0]}"x${e[1]}`).join(", "));
+  }
+  // A partial capture that looks complete is the thing to avoid here.
+  if (unseen.length) {
+    bgLog(`[background] SYOS: ${unseen.length} screen(s) not captured yet - ` +
+      unseen.map((x) => `${x.id} ${x.name}`).join(", ") +
+      `. Open each one on the page to add its seats.`);
+  } else if (screens.length) {
+    bgLog(`[background] SYOS: all ${screens.length} screen(s) captured`);
+  }
+
+  // mergeSeats, not a raw spread: an auto-pull must export this capture
+  // alone rather than whatever an earlier screen left behind.
+  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
+  games[gameKey].site = site;
+  games[gameKey].lastScanned = Date.now();
   if (tabId) tabGameMap[tabId] = gameKey;
   await chrome.storage.local.set({ games });
 }

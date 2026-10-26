@@ -9,7 +9,7 @@
   // Three debugging rounds in this project were spent on results produced by a
   // build that had not been reloaded, which is indistinguishable from a change
   // that did not work. Compare this against what package.py prints.
-  const BUILD_STAMP = "4c145b12";
+  const BUILD_STAMP = "5d97e52f";
   
   // Detect which ticketing site we're on
   const isTicketmaster = window.location.hostname.includes('ticketmaster.com');
@@ -33,6 +33,11 @@
   const isGametime = window.location.hostname.includes('gametime.co');
   const isGoTickets = window.location.hostname.includes('gotickets.com');
   const isTicketsForLess = window.location.hostname.includes('ticketsforless');
+  // Ruth Eckerd Hall. Host-specific for now: the two-number url shape
+  // (/33733/33816) looks like a ticketing platform rather than a bespoke site,
+  // so if the same shape turns up at another venue this becomes a platform
+  // check instead of a hostname one.
+  const isRuthEckerd = window.location.hostname.includes('rutheckerdhall.com');
 
   if (isTicketmaster) {
     console.log("[FIFA Ticket Scout] Running on Ticketmaster (will use adapter) build " + BUILD_STAMP);
@@ -56,6 +61,8 @@
     console.log("[FIFA Ticket Scout] Running on GoTickets (passive capture) build " + BUILD_STAMP);
   } else if (isTicketsForLess) {
     console.log("[FIFA Ticket Scout] Running on TicketsForLess (passive capture) build " + BUILD_STAMP);
+  } else if (isRuthEckerd) {
+    console.log("[FIFA Ticket Scout] Running on Ruth Eckerd Hall (passive capture) build " + BUILD_STAMP);
   } else {
     console.log("[FIFA Ticket Scout] Unknown ticketing site - no action");
     return;
@@ -92,6 +99,15 @@
           ? ["/pac-api/"]
           : isTickPick
             ? ["/listings/internal/event-v2/"]
+            : isRuthEckerd
+              // Confirmed on performance 33816: Tessitura SYOS serves the seats
+              // from /api/syos/GetSeatList (311KB, 728 seats for one screen)
+              // and the price zones from /api/syos/GetInitData. Matched on the
+              // directory rather than the two method names: SYOS ships other
+              // calls under it, background.js checks the payload shape before
+              // parsing, and a venue on a slightly different build would
+              // otherwise be invisible.
+              ? ["/api/syos/"]
             : isTicketsForLess
               // Confirmed on event 7730195 (Chiefs vs Colts): GET
               // /api/tickets/tfl?EventID=<id>, 204KB, 538 tickets with seat
@@ -194,7 +210,8 @@
   // returned no seats". These counters say which actually happened, and go
   // through console.log so content.js relays them into Download Logs.
   const SITE_TAG = isStubHub ? "SH" : isSeatGeek ? "SG" : isEvenue ? "EV"
-    : isTickPick ? "TP" : isAxs ? "AXS" : isTicketmaster ? "TM" : "FIFA";
+    : isTickPick ? "TP" : isAxs ? "AXS" : isTicketmaster ? "TM"
+    : isRuthEckerd ? "REH" : "FIFA";
   const capStats = { seen: 0, matched: 0, parsed: 0, notJson: 0, posted: 0 };
   let capSummaryTimer = null;
 
@@ -391,7 +408,8 @@
   // second reload. Only runs while nothing has matched yet, and only for JSON
   // responses on the passive-capture sites, so the cost disappears the moment
   // capture works.
-  const isPassiveSite = isStubHub || isSeatGeek || isEvenue || isTickPick || isAxs;
+  const isPassiveSite = isStubHub || isSeatGeek || isEvenue || isTickPick || isAxs
+    || isRuthEckerd;
 
   // Sites where the inventory endpoint is still unknown. Candidate recording
   // normally stops as soon as MATCH_PATTERNS hits something, which is right
@@ -481,7 +499,7 @@
   //
   // Set to a short site tag ("EV", "SH", "SG", …) to hunt a new site's
   // inventory endpoint; null once that site is parsed.
-  // TicketsForLess is parsed now (/api/tickets/tfl, captured passively), so
+  // Ruth Eckerd Hall is parsed now (/api/syos/, captured passively), so
   // nothing is in bring-up. Set this to a short site tag to map the next
   // source; package-check.js blocks a release while it is non-null.
   const DISCOVERY_SITE = null;
@@ -979,6 +997,7 @@
         : isGametime ? window.__gametimeAdapter
         : isGoTickets ? window.__goticketsAdapter
         : isTicketsForLess ? window.__ticketsforlessAdapter
+        : isRuthEckerd ? window.__rutheckerdAdapter
         : isVividSeats ? window.__vividseatsAdapter
         : null;
       return adapter ? adapter.getEventInfo() : undefined;
@@ -1674,7 +1693,7 @@
   //      chatty enough to blow out the buffer in seconds.
   //   2. Guard re-entrancy. Our postMessage is observed by the listener below,
   //      and anything that logs while handling a message would loop forever.
-  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[FIFA]", "[TM]", "[SG]", "[SH]", "[EV]", "[TP]", "[AXS]", "[TP-PROBE]", "[EV-PROBE]", "[SH-PROBE]", "[SG-PROBE]", "[TM-PROBE]", "[AXS-PROBE]", "[GOT]", "[GOT-PROBE]", "[TFL]", "[TFL-PROBE]"];
+  const LOG_PREFIXES = ["[FIFA Ticket Scout]", "[FIFA]", "[TM]", "[SG]", "[SH]", "[EV]", "[TP]", "[AXS]", "[TP-PROBE]", "[EV-PROBE]", "[SH-PROBE]", "[SG-PROBE]", "[TM-PROBE]", "[AXS-PROBE]", "[GOT]", "[GOT-PROBE]", "[TFL]", "[TFL-PROBE]", "[REH]", "[REH-PROBE]"];
   const originalLog = console.log;
   let relayingLog = false;
   console.log = function (...args) {

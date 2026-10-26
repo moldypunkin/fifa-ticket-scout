@@ -174,6 +174,7 @@ function siteFromUrl(url) {
     if (h.includes("gametime")) return "gametime";
     if (h.includes("gotickets")) return "gotickets";
     if (h.includes("ticketsforless")) return "ticketsforless";
+    if (h.includes("rutheckerdhall")) return "rutheckerd";
     if (h.includes("axs")) return "axs";
     if (h.includes("-shop-")) return "lms";
     if (h.includes("-resale-")) return "resale";
@@ -273,6 +274,24 @@ function loadData() {
       || url.match(/^[a-z]+:\/\/[^/]+[^?#]*-(\d{5,})(?=[/?#.]|$)/i));
     const tflEventId = tflEventMatch ? tflEventMatch[1] : null;
     const isTicketsForLessEvent = !!tflEventId;
+    // Ruth Eckerd Hall: two numeric path segments, "/33733/33816". Mirrors
+    // getRuthEckerdEventId() in rutheckerd-adapter.js — both join them with a
+    // colon, and neither lets queueittoken near the key: it is a Queue-it
+    // session token that changes every visit.
+    const isRuthEckerdSite = /rutheckerdhall\.com/.test(url);
+    let rehEventId = null;
+    if (isRuthEckerdSite) {
+      const path = (() => { try { return new URL(url).pathname; } catch (e) { return ""; } })();
+      // The SECOND number: the API keys every request on performanceId, and
+      // the first is the production season.
+      const pair = path.match(/^\/(\d{3,})\/(\d{3,})(?:[/?#]|$)/);
+      if (pair) rehEventId = pair[2];
+      else {
+        const single = path.match(/^\/(\d{4,})(?:[/?#]|$)/);
+        if (single) rehEventId = single[1];
+      }
+    }
+    const isRuthEckerdEvent = !!rehEventId;
 
     // GoTickets: the numeric id straight after /tickets/, e.g.
     //   /tickets/1984079/trans-siberian-orchestra-tickets/…-12-29-2026
@@ -308,6 +327,7 @@ function loadData() {
         : isGametimeEvent ? "gametime"
         : isGoTicketsEvent ? "gotickets"
         : isTicketsForLessEvent ? "ticketsforless"
+        : isRuthEckerdEvent ? "rutheckerd"
         : null,
       // No site is in bring-up right now. A site belongs here rather than in
       // `passive` while it is recognised but has no parser, so the empty state
@@ -365,6 +385,9 @@ function loadData() {
       } else if (gtEventId) {
         const gtKey = `gametime:${gtEventId}`;
         if (games[gtKey]) activeKey = gtKey;
+      } else if (rehEventId) {
+        const rehKey = `rutheckerd:${rehEventId}`;
+        if (games[rehKey]) activeKey = rehKey;
       } else if (gotEventId) {
         const gotKey = `gotickets:${gotEventId}`;
         if (games[gotKey]) activeKey = gotKey;
@@ -968,7 +991,7 @@ let currentSite = "resale";
 // again changes this one line.
 const CONFIG_REPO = "https://raw.githubusercontent.com/moldypunkin/fifa-ticket-scout/main";
 
-const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", tickpick: "TickPick", axs: "AXS", vividseats: "Vivid Seats", gametime: "Gametime", gotickets: "GoTickets", ticketsforless: "TicketsForLess", resale: "Resale" };
+const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", tickpick: "TickPick", axs: "AXS", vividseats: "Vivid Seats", gametime: "Gametime", gotickets: "GoTickets", ticketsforless: "TicketsForLess", rutheckerd: "Ruth Eckerd Hall", resale: "Resale" };
 
 // The header follows the active site. `lms` and `resale` are both FIFA
 // properties, so they keep the original name.
@@ -989,6 +1012,7 @@ const SITE_FILE_TAGS = {
   gametime: "gametime",
   gotickets: "gotickets",
   ticketsforless: "ticketsforless",
+  rutheckerd: "ruth-eckerd-hall",
 };
 
 function siteFileTag(site) {
@@ -1017,6 +1041,7 @@ const PASSIVE_SITE_LABELS = {
   gametime: "Gametime",
   gotickets: "GoTickets",
   ticketsforless: "TicketsForLess",
+  rutheckerd: "Ruth Eckerd Hall",
 };
 
 const SITE_BRANDS = {
@@ -1032,6 +1057,7 @@ const SITE_BRANDS = {
   gametime: "Gametime Scout",
   gotickets: "GoTickets Scout",
   ticketsforless: "TicketsForLess Scout",
+  rutheckerd: "Ruth Eckerd Hall Scout",
 };
 
 function setBrand(site) {
@@ -2008,7 +2034,7 @@ function compareVersions(a, b) {
 // tickpick stores `p`, the per-ticket price the listing quotes. TickPick
 // advertises all-in pricing so 1.0 is expected to be right, but that has not
 // been checked against a checkout page.
-const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0, gotickets: 1.0, ticketsforless: 1.0 };
+const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0, gotickets: 1.0, ticketsforless: 1.0, rutheckerd: 1.0 };
 
 // Flat per-ticket fee, added after the multiplier. Percentage fees alone could
 // not describe Evenue: its price-level table quotes a base price and the site

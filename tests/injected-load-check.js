@@ -82,6 +82,7 @@ const SITES = [
   ["Gametime",      "https://gametime.co/nfl-football/chiefs-at-broncos-tickets/9-14-2026-denver-empower-field/events/6512ab34cd56ef7890123456", true],
   ["GoTickets",     "https://gotickets.com/tickets/1984079/trans-siberian-orchestra-tickets/t-mobile-center-kansas-city-mo-12-29-2026?orderBy=Price%3A+Low+to+High&quantity=2", true],
   ["TicketsForLess","https://www.ticketsforless.com/events/nfl-football-tickets/kansas-city-chiefs-vs-indianapolis-colts-2026-09-20-19-20-00-7730195", true],
+  ["Ruth Eckerd",   "https://secure.rutheckerdhall.com/33733/33816?_gl=1*xs0mo*_gcl_au*MTU2MDc5MDk0NC4xNzkzMDMxNTE1&queueittoken=e_saftynetqueue2021v3~ts_1793031699~ce_true~rt_safetynet~h_bba84c12421f93a272d531e23826e17c38ae230baf4280a8dbe2938a2d644fed", true],
   ["unrelated site","https://example.com/", false],
 ];
 

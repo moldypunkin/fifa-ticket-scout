@@ -41,6 +41,7 @@ passed while the extension misbehaved.
 | `tm-unplaced-facets-check` | resale listings that publish a section and a count but no seat places — 867 of them on one event, dropped in silence until this |
 | `tm-facets-pagination-check` | following ISMDS page links, and keeping what was fetched when a page fails |
 | `section-filter-check` | the section filter box: matching rules, and that it runs before every renderer |
+| `rutheckerd-check` / `rutheckerd-e2e-check` | Tessitura SYOS: zone pricing with the per-seat fee, availability read from the words not the codes, and that the parser and the popup agree on the storage key exactly |
 | `deal-score-check` | the Best Value ranking: the peer ladder, median baselines, group and row edges, and the caveats shown rather than subtracted |
 | `probe-format-check` | discovery probe output format and log-relay tagging |
 

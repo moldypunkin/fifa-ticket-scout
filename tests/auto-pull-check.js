@@ -117,7 +117,9 @@ check("later saves merge", same(Object.keys(mergeSeats({ c: {} }, { d: {} }, 7, 
 check("another tab is untouched", same(Object.keys(mergeSeats(old, { c: {} }, 8, "k")).sort(), ["a", "b", "c"]));
 const rawMerges = (bg.match(/games\[gameKey\]\.seats = \{ \.\.\.games\[gameKey\]\.seats, \.\.\.seats \};/g) || []).length;
 const viaHelper = (bg.match(/games\[gameKey\]\.seats = mergeSeats\(games\[gameKey\]\.seats, seats, tabId, gameKey\);/g) || []).length;
-check("every save path goes through mergeSeats", rawMerges === 0 && viaHelper === 11, `${rawMerges} raw, ${viaHelper} via helper`);
+// The count rises by one with each new source; rawMerges === 0 is the part
+// that matters, and the number keeps a new save path from quietly skipping it.
+check("every save path goes through mergeSeats", rawMerges === 0 && viaHelper === 12, `${rawMerges} raw, ${viaHelper} via helper`);
 
 out("\n--- 3. one CSV builder, shared ---");
 const ctx = {};
