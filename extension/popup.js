@@ -85,6 +85,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Download logs
   onClick("logsBtn", downloadLogs);
+  // The same action from the empty state, where it is needed most: a capture
+  // that produced nothing is the case you cannot diagnose without the logs.
+  onClick("emptyLogsBtn", downloadLogs);
   initCategoryImport();
 
   // Clear data

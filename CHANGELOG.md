@@ -4,6 +4,76 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## October 27, 2026 — v3.4.1
+
+### AXS Prices Are Right Now
+
+v3.4.0 shipped AXS seats with prices known to read low — a seat shown at $34.75
+rang up at $45.71. The missing $10.96 is now accounted for, to the cent.
+
+**The fee bands are keyed in dollars. Every other amount in the payload is in
+hundredths.** The Midland Theatre's table opens `{"start":0,"end":15,"amount":162}`
+— $1.62 on a ticket up to $15 — so looking up a $64.75 seat as `6475` matched
+none of the 37 bands, and three of the four components of its service fee were
+read as nothing at all. That was the whole gap.
+
+A fee component is a flat amount, a rate, or a band looked up by the ticket's own
+price, and the arithmetic is now:
+
+```
+P4  $34.75 level
+  + 0.13   AXS_MID_CCFEE_WEB_TAXTIX_AXS    0.38% of 34.75
+  + 2.83   AXS_MID_AXFEE_WEB_GEN_AXS       band 30-35
+  + 0.30   AXS_MID_CCFEE_WEB_GENFEES_AXS   band 30-35
+  + 6.59   VEN_MID_VENFEE_WEB_GEN_VEN      band 30-35
+  + 1.11   AXS_MID_CCFEE_WEB_GENTIX_AXS    3.2% of 34.75
+  = $45.71   — the figure the site charges
+```
+
+**Delivery is left out, and that is why the gap would not reconcile earlier.**
+Standard Mail ($5.81) and Venue Will Call ($9.69) are `PerOrder`, assigned to
+`MethodOfDelivery`, and charged once per order only if you pick them over the
+free mobile default. Trying to fit $5.81 into a per-seat gap was never going to
+work. Only fees the offer assigns to the OFFER, with `applicationMethod`
+`PerItem`, price a seat.
+
+**Fees are read per offer, not per event.** The AXS Premium offer on this event
+takes three flat percentages (3.66 / 4.3 / 10.04%) and no bands at all, so the
+same $64.75 level comes to $76.65 there against $81.22 on standard.
+
+If a band ever fails to cover a price, the seat keeps the fees that did resolve
+and the log says `INCOMPLETE — a fee did not resolve`, rather than silently
+falling back to a level total that is low by all of them.
+
+AXS and resale rows now mean the same thing: both are all in. A resale offer's
+`totalPrice` already includes its connection fee, so the two can be compared
+with each other and against the other sites.
+
+### Resale Events, And Prices That Survive The Worker Sleeping
+
+**Resale-only events price the offer, not the seat.** On the AfterEvent flow
+every item carries `priceLevelID: null` and the money sits on the offer:
+`totalPrice 125.5` = $100 base plus a $25.50 connection fee, with
+`buyerConnectionFeeRate 0.255`. Requiring a price level dropped all 57 seats of
+a Midland resale event. The offer total is now the fallback, the face value and
+seller notes ride along as attributes, and a General Admission Floor listing
+with row "GA" and no seat number comes through. Resale seats key on
+`veritix:<offerID>:<item.id>`, since sectionID and rowID are null there.
+
+**The price index died with the service worker.** The price payload arrives once
+on load while offer/search is polled every minute, so a Jimmy Carr event stored
+629 seats at 21:30 and logged "0 seats, 629 with no price for their level" a
+minute later. Price levels are kept on the game now, and a test simulates the
+restart.
+
+### Also
+
+Download Logs is reachable from the empty state — previously it only appeared
+once listings had been found, which is the wrong way round when the thing you
+need to report is that nothing was found.
+
+---
+
 ## October 26, 2026 — v3.4.0
 
 ### AXS: the Veritix Seats, Found At Last

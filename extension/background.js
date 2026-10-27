@@ -1086,7 +1086,7 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
     if (!token) {
       bgLog("[background] AXS Veritix: no token in " + url.split("?")[0]);
     } else if (/\/price(\?|$)/i.test(url) && body && Array.isArray(body.offerPrices)) {
-      axsIndexVeritixPrices(token, body);
+      await axsIndexVeritixPrices(token, body);
     } else if (/offer\/search/i.test(url) && body && Array.isArray(body.offers)) {
       await enforceGameLimit(`${site}:${token}`);
       await saveAxsVeritixSeats(token, body, tabId, site, eventInfo);
@@ -4184,7 +4184,130 @@ function axsVeritixLevelPrice(level) {
   return hundredths > 0 ? hundredths / 100 : null;
 }
 
-function axsIndexVeritixPrices(token, body) {
+// The fee inputs behind one price level, a fee per line so nothing is
+// truncated away: every fee in the table, which of them this offer actually
+// assigns, each component's method, and — for a component priced off a lookup
+// table of 37 bands — only the band holding this seat's own price. Amounts are
+// in hundredths, like the base: a resale offer carrying base 13800 and
+// buyerConnectionFeeRate 0.255 prices its fee at exactly 3519.
+function axsLogVeritixFeeInputs(body, op, offerID, level, dollars) {
+  const hundredths = Math.round(dollars * 100);
+  const assigned = (op.fees || []).map((f) => String(f && f.id));
+
+  const describe = (c) => {
+    const bits = [c.name || c.id || "component", c.calculationMethod || "?"];
+    if (c.amount != null) bits.push(`amount=${c.amount}`);
+    if (c.rate != null) bits.push(`rate=${c.rate}`);
+    if (c.roundOff != null) bits.push(`roundOff=${c.roundOff}`);
+    const ranges = Array.isArray(c.lookupRanges) ? c.lookupRanges : [];
+    if (ranges.length) {
+      const band = ranges.filter((r) =>
+        hundredths >= Number(r.start) && hundredths <= Number(r.end))[0];
+      bits.push(band
+        ? `band ${band.start}-${band.end} => ${band.amount}`
+        : `none of ${ranges.length} bands hold ${hundredths}`);
+    }
+    return bits.join(" ");
+  };
+
+  bgLog(`[background] AXS Veritix: level ${level.priceLevelID} "${level.label || ""}" ` +
+    `base ${hundredths} hundredths, offer ${offerID} assigns ` +
+    `[${assigned.join(", ")}] of ${(body.fees || []).length} fee(s)`);
+  for (const fee of body.fees || []) {
+    const mine = assigned.indexOf(String(fee.id)) !== -1;
+    const comps = (fee.components || []).map(describe).join(" | ");
+    bgLog(`[background] AXS Veritix fee ${fee.id} ${mine ? "ASSIGNED" : "unused"} ` +
+      `"${fee.name || ""}" apply=${fee.applicationMethod || "?"}: ${comps}`);
+  }
+  bgLog(`[background] AXS Veritix assignments: ` +
+    JSON.stringify(op.fees || []).slice(0, 800));
+  bgLog(`[background] AXS Veritix taxes: ` +
+    JSON.stringify(body.taxes || []).slice(0, 400));
+  bgLog(`[background] AXS Veritix one whole price level: ` +
+    JSON.stringify(level).slice(0, 700));
+}
+
+// One fee component resolved for a ticket priced at `dollars`.
+//
+// The lookup bands are keyed in DOLLARS while every amount in the payload is in
+// hundredths. The Midland table starts {start:0,end:15,amount:162} — $1.62 on a
+// ticket up to $15 — so matching a band against 6475 found nothing at all, and
+// the three lookup components of its service fee went unread.
+//
+// Bands share an edge (0-15, then 15-20), so a ticket priced exactly on one is
+// ambiguous; the lower band wins here, which only matters at the edge itself.
+function axsVeritixFeeComponent(c, dollars) {
+  const method = String((c && c.calculationMethod) || "").toLowerCase();
+  const round = (n) => {
+    const step = Number(c.roundOff);
+    if (!isFinite(step) || step <= 0) return n;
+    return Math.round(n / step) * step;
+  };
+  const ranges = Array.isArray(c.lookupRanges) ? c.lookupRanges : [];
+  if (method === "lookup" || ranges.length) {
+    for (const r of ranges) {
+      if (dollars >= Number(r.start) && dollars <= Number(r.end)) {
+        return { dollars: round(Number(r.amount) / 100), how: `band ${r.start}-${r.end}` };
+      }
+    }
+    return { dollars: null, how: `no band holds ${dollars} of ${ranges.length}` };
+  }
+  if (method === "percentage") {
+    const rate = Number(c.rate);
+    if (!isFinite(rate)) return { dollars: null, how: "percentage with no rate" };
+    // Read as a percent, not a multiplier: 3.2 means 3.2%. The checkout total
+    // is what settles this — as dollars it would instead be a flat $3.20.
+    return { dollars: round(dollars * rate / 100), how: `${rate}% of ${dollars}` };
+  }
+  const flat = Number(c.amount);
+  if (!isFinite(flat)) return { dollars: null, how: "no amount" };
+  return { dollars: round(flat / 100), how: "flat" };
+}
+
+// What one ticket at this level would cost all in, as far as the payload
+// describes it: the level's own components plus the fees the offer assigns to
+// the OFFER. Method-of-delivery fees are left out — they are charged per order
+// and only if you choose mail or will-call, where the FlashSeats default is
+// free, so they do not belong in a per-seat price.
+//
+// Confirmed against a real checkout: the Jimmy Carr P4 level, whose $34.75
+// level total rang up at $45.71 on the site, totals to $45.71 here from
+// 0.38% + band 30-35 x3 + 3.2%. The AXS Premium offer on the same event takes
+// a different fee set (three percentages, no bands), which is why the fees are
+// read per offer rather than per event.
+function axsVeritixCandidateTotal(body, op, dollars) {
+  const perItem = {};
+  for (const f of (op.fees || [])) {
+    const assigned = (f.assignments || []).some(
+      (a) => String((a && a.assignment) || "").toLowerCase() === "offer");
+    if (assigned) perItem[String(f.id)] = true;
+  }
+  let total = dollars;
+  let complete = true;
+  const parts = [];
+  for (const fee of (body.fees || [])) {
+    if (!perItem[String(fee.id)]) continue;
+    if (String(fee.applicationMethod || "").toLowerCase() !== "peritem") continue;
+    for (const c of (fee.components || [])) {
+      const got = axsVeritixFeeComponent(c, dollars);
+      if (got.dollars == null) {
+        // One fee short understates the seat, but keeping the bare level total
+        // would understate it by all of them, so the partial total stands and
+        // says so.
+        complete = false;
+        parts.push(`${c.name || c.id}=? (${got.how})`);
+        continue;
+      }
+      total += got.dollars;
+      parts.push(`${c.name || c.id}=${got.dollars.toFixed(2)} (${got.how})`);
+    }
+  }
+  // Summing cents in floating point leaves 59.92999999999999 behind, which is
+  // a price the popup would have to round anyway.
+  return { total: Math.round(total * 100) / 100, parts, complete };
+}
+
+async function axsIndexVeritixPrices(token, body) {
   const byOffer = axsVeritixPrices[token] || (axsVeritixPrices[token] = {});
   let levels = 0;
   const preview = [];
@@ -4196,10 +4319,25 @@ function axsIndexVeritixPrices(token, body) {
       for (const level of (zp.priceLevels || [])) {
         const dollars = axsVeritixLevelPrice(level);
         if (dollars == null || level.priceLevelID == null) continue;
-        map[String(level.priceLevelID)] = dollars;
+        // The all-in figure, so an AXS seat can be compared against a resale
+        // row (whose totalPrice already includes its connection fee) and
+        // against the other sites.
+        let priced = dollars;
+        try {
+          const all = axsVeritixCandidateTotal(body, op, dollars);
+          priced = all.total;
+          bgLog(`[background] AXS Veritix: offer ${offerID} level ` +
+            `${level.priceLevelID} "${level.label || ""}" $${dollars.toFixed(2)} ` +
+            `-> $${all.total.toFixed(2)} all in` +
+            (all.complete ? "" : " (INCOMPLETE — a fee did not resolve)") +
+            ` = ${all.parts.join(" + ") || "no per-item fees"}`);
+        } catch (e) {
+          bgLog("[background] AXS Veritix: could not total the fees: " + (e && e.message));
+        }
+        map[String(level.priceLevelID)] = priced;
         levels++;
         if (preview.length < 6) {
-          preview.push(`${level.label || level.priceLevelID}=$${dollars.toFixed(2)}`);
+          preview.push(`${level.label || level.priceLevelID}=$${priced.toFixed(2)}`);
         }
         if (!axsVeritixPriceShapeLogged) {
           axsVeritixPriceShapeLogged = true;
@@ -4208,20 +4346,16 @@ function axsIndexVeritixPrices(token, body) {
           bgLog(`[background] AXS Veritix: price level ${level.priceLevelID} built from ` +
             `${parts} = $${dollars.toFixed(2)}`);
           // The components alone read LOW: a seat shown at $34.75 rings up at
-          // $45.71 on the site, a $10.96 gap that matches a service fee plus
-          // tax. Those live in a separate fees table, keyed by id from the
-          // offer, each with its own calculation method. Print the inputs
-          // rather than guess the arithmetic: a wrong formula would misprice
-          // every seat on every AXS event and still look plausible.
+          // $45.71 on the site. The rest lives in a separate fees table, keyed
+          // by id from the offer, each fee a set of components that are either
+          // a flat amount, a rate, or a band looked up by the ticket's price.
+          //
+          // Print the inputs rather than guess the arithmetic: a wrong formula
+          // would misprice every seat on every AXS event and still look
+          // plausible. A whole 28-fee table does not survive being dumped as
+          // one truncated string, so it goes a fee per line.
           try {
-            bgLog(`[background] AXS Veritix fees table: ` +
-              JSON.stringify(body.fees || []).slice(0, 1200));
-            bgLog(`[background] AXS Veritix offer ${offerID} fee assignments: ` +
-              JSON.stringify(op.fees || []).slice(0, 600));
-            bgLog(`[background] AXS Veritix taxes: ` +
-              JSON.stringify(body.taxes || []).slice(0, 400));
-            const lvl0 = JSON.stringify(level).slice(0, 700);
-            bgLog(`[background] AXS Veritix one whole price level: ${lvl0}`);
+            axsLogVeritixFeeInputs(body, op, offerID, level, dollars);
           } catch (e) {
             bgLog("[background] AXS Veritix: could not print the fee inputs: " + (e && e.message));
           }
@@ -4230,7 +4364,24 @@ function axsIndexVeritixPrices(token, body) {
     }
   }
   bgLog(`[background] AXS Veritix: ${levels} price level(s) across ` +
-    `${Object.keys(byOffer).length} offer(s) [${preview.join(" ")}]`);
+    `${Object.keys(byOffer).length} offer(s) [${preview.join(" ")}]` +
+    (levels ? "" : " — this event prices its offers directly instead"));
+  if (levels) await axsPersistVeritixPrices(token, byOffer);
+}
+
+// Kept on the game so a worker restart between the price payload and the next
+// poll of offer/search cannot un-price seats that were already stored.
+async function axsPersistVeritixPrices(token, byOffer) {
+  try {
+    const gameKey = `axs:${token}`;
+    const data = await getStorage();
+    const games = data.games || {};
+    if (!games[gameKey]) games[gameKey] = emptyGame();
+    games[gameKey].axsPriceLevels = byOffer;
+    await chrome.storage.local.set({ games });
+  } catch (e) {
+    bgLog("[background] AXS Veritix: could not store the price levels: " + (e && e.message));
+  }
 }
 
 async function saveAxsVeritixSeats(token, body, tabId, site, eventInfo) {
@@ -4240,6 +4391,19 @@ async function saveAxsVeritixSeats(token, body, tabId, site, eventInfo) {
   const data = await getStorage();
   const games = data.games || {};
   if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  // The price payload arrives once, on load; offer/search is polled every
+  // minute. The worker sleeps in between, and in-memory price levels died with
+  // it — the Jimmy Carr event stored 629 seats, then logged "0 seats, 629 with
+  // no price" a minute later. The levels are kept on the game as well.
+  const storedPrices = games[gameKey].axsPriceLevels;
+  if (storedPrices && typeof storedPrices === "object") {
+    const live = axsVeritixPrices[token] || {};
+    for (const offerID of Object.keys(storedPrices)) {
+      live[offerID] = Object.assign({}, storedPrices[offerID], live[offerID]);
+    }
+    axsVeritixPrices[token] = live;
+  }
 
   // tix.axs.com's own JSON-LD reads "FanSight" or the venue's name, so an
   // indexed name from start-flow is preferred where there is one.
@@ -4274,30 +4438,61 @@ async function saveAxsVeritixSeats(token, body, tabId, site, eventInfo) {
     if (!offer || !Array.isArray(offer.items)) continue;
     const offerID = String(offer.offerID || "");
     const offerPrices = prices[offerID] || {};
-    offerSeen.push(`${offer.category || offerID}×${offer.items.length}`);
+
+    // Resale listings (offerType FLASHSEATS, the AfterEvent flow) have
+    // priceLevelID null on every seat and price the OFFER instead:
+    //
+    //   connectionFee 25.5, buyerConnectionFeeRate 0.255, totalPrice 125.5
+    //
+    // 100 base + 25.50 fee, per ticket, all in. Looking for a price level on
+    // these dropped all 57 seats of a Midland Theatre resale event.
+    const offerTotal = Number(offer.totalPrice);
+    const offerPrice = isFinite(offerTotal) && offerTotal > 0 ? offerTotal : null;
+    const isResale = String(offer.offerType || "").toUpperCase() === "FLASHSEATS";
+    offerSeen.push(`${isResale ? "resale" : (offer.category || offerID)}×${offer.items.length}`);
 
     for (const item of offer.items) {
       if (!item) continue;
       const status = String(item.statusCodeLabel || "");
       if (statusSeen.size < 12) statusSeen.set(status, (statusSeen.get(status) || 0) + 1);
 
-      const dollars = offerPrices[String(item.priceLevelID)];
+      // The level wins when there is one: on a primary onsale the level is
+      // the seat's own price, while totalPrice may describe the whole offer.
+      const dollars = offerPrices[String(item.priceLevelID)] != null
+        ? offerPrices[String(item.priceLevelID)]
+        : offerPrice;
       if (dollars == null) { missingPrice++; continue; }
 
       const block = String(item.sectionLabel || item.sectionID || "");
       const row = String(item.rowLabel || "");
       const attrs = [];
       if (status && status !== "Open") attrs.push(status);
-      if (item.seatType && item.seatType !== "STANDARD") attrs.push(String(item.seatType));
+      if (item.seatType && item.seatType !== "STANDARD" && !isResale) {
+        attrs.push(String(item.seatType));
+      }
+      if (isResale) {
+        attrs.push("resale");
+        // What the seller paid, where the payload says: a $125.50 ticket whose
+        // face was $62.67 is a different proposition from one priced at face.
+        const face = Number(item.originalPrice);
+        if (isFinite(face) && face > 0) attrs.push(`face $${face.toFixed(2)}`);
+        const notes = String(offer.sellerNotes || "").trim();
+        if (notes) attrs.push(notes.slice(0, 80));
+      }
 
       // sectionID+rowID+number is unique within an offer, and the offer id
       // keeps the ADA and premium copies of a section apart.
-      seats[`veritix:${offerID}:${item.sectionID}:${item.rowID}:${item.number}`] = {
+      // item.id is unique across the venue on the resale flow, where
+      // sectionID and rowID are null; the primary flow has all three.
+      const seatKey = item.sectionID != null && item.rowID != null
+        ? `veritix:${offerID}:${item.sectionID}:${item.rowID}:${item.number}`
+        : `veritix:${offerID}:${item.id}`;
+      seats[seatKey] = {
         block,
         row,
-        seat: String(item.number || ""),
+        seat: String(item.number == null ? "" : item.number),
         area: String(item.neighborhoodPrintDescription || ""),
-        category: String(offer.category || "standard"),
+        category: isResale ? "resale" : String(offer.category || "standard"),
         tier: VenueTiers.tierFor(venueName, block, row),
         price: Math.round(dollars * 1000),
         exclusive: true,
