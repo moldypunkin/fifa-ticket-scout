@@ -4,6 +4,27 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## October 29, 2026 — v3.5.0
+
+### Every Row Says Primary or Resale
+
+The CSV gains a **Type** column, the last one, so nothing reading columns by position moves.
+It holds `primary`, `resale`, or blank when the extension cannot tell. TicketPortal uses it to build
+shadow suggestions from primary listings only.
+
+Category already carried the answer, but it means something different on every site, so the verdict
+is now made once, here (`listingType` in `csv-export.js`):
+
+- **Ticketmaster / AXS** sell both: Category `resale` is resale; anything else (Ticketmaster's
+  `standard`, Account Manager's `primary`, an AXS offer category) is primary.
+- **SeatGeek** is the primary seller for some teams, so it is judged per listing from its channel field:
+  `exchange`, `marketplace` and `fan_to_fan` are resale (the only values in 20 real exports); a value
+  containing `primary` is primary; any other value is left blank rather than guessed.
+- **FIFA Last Minute Sales, eVenue, Ruth Eckerd Hall**: primary.
+- **FIFA resale, StubHub, TickPick, Vivid, GameTime, GoTickets, TicketsForLess**: resale.
+
+---
+
 ## October 27, 2026 — v3.4.1
 
 ### AXS Prices Are Right Now

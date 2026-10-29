@@ -11,6 +11,31 @@
 (function (root) {
   "use strict";
 
+  // PRIMARY or RESALE for one seat, written as the export's Type column so TicketPortal does not have to
+  // interpret Category, which means something different on every site. Returns "primary", "resale" or ""
+  // (unknown, never a guess; the portal leaves unknown out of its "Primary only" shadow suggestions).
+  //   ticketmaster / axs  sell both: Category "resale" is resale; anything else is the seller's own
+  //                       primary inventory (Ticketmaster's "standard", Account Manager's "primary",
+  //                       an AXS offer category)
+  //   seatgeek            the primary seller for SOME teams, so per listing from its channel field (m):
+  //                       exchange / marketplace / fan_to_fan are resale (all that 20 exports held,
+  //                       2026-10-29); a value containing "primary" is primary; anything new is unknown
+  //   lms, evenue, rutheckerd   FIFA Last Minute Sales and venue box offices: primary
+  //   resale (FIFA resale) and the marketplaces: resale
+  const PRIMARY_SITES = { lms: 1, evenue: 1, rutheckerd: 1 };
+  const MIXED_SITES = { ticketmaster: 1, axs: 1 };
+  const RESALE_SITES = { resale: 1, stubhub: 1, tickpick: 1, vividseats: 1, gametime: 1, gotickets: 1, ticketsforless: 1 };
+  const SG_RESALE = { exchange: 1, marketplace: 1, fan_to_fan: 1 };
+  function listingType(site, category) {
+    const st = String(site || "").toLowerCase();
+    const c = String(category == null ? "" : category).trim().toLowerCase();
+    if (st === "seatgeek") return /primary/.test(c) ? "primary" : SG_RESALE[c] ? "resale" : "";
+    if (MIXED_SITES[st]) return /resale/.test(c) ? "resale" : c ? "primary" : "";
+    if (PRIMARY_SITES[st]) return "primary";
+    if (RESALE_SITES[st]) return "resale";
+    return "";
+  }
+
   // game: one entry of chrome.storage.local.games
   // opts: { gameKey, now: Date, priceUSD(cents), tierFor(venue, block, row),
   //         fileTag(site), auto: bool }
@@ -48,7 +73,8 @@
     // Tier is the cross-site seating band from tiers.js. On the FIFA sites
     // Category is the real CAT 1/2/3/4 and Tier sits alongside it; on the
     // marketplaces Category is a constant and Tier is the useful column.
-    const header = "Block,Area,Row,Seat,Seat_Range,Category,Tier,Price_USD,Exclusive";
+    // Type (primary / resale / blank) is LAST so a reader keyed on column position is undisturbed.
+    const header = "Block,Area,Row,Seat,Seat_Range,Category,Tier,Price_USD,Exclusive,Type";
     const rows = seats
       .sort((a, b) =>
         a.price - b.price
@@ -63,7 +89,7 @@
         // venue mapping changes.
         const tier = o.tierFor(m.venue, s.block, s.row);
         const tierCell = tier.includes(",") ? `"${tier}"` : tier;
-        return `${s.block},${area},${s.row},${s.seat},${s.seatRange || ""},${s.category},${tierCell},${o.priceUSD(s.price).toFixed(2)},${s.exclusive}`;
+        return `${s.block},${area},${s.row},${s.seat},${s.seatRange || ""},${s.category},${tierCell},${o.priceUSD(s.price).toFixed(2)},${s.exclusive},${listingType(s.site || game.site, s.category)}`;
       });
 
     const csv = [...meta, "", header, ...rows].join("\n");
@@ -79,4 +105,5 @@
   }
 
   root.buildScoutCsv = buildScoutCsv;
+  root.scoutListingType = listingType;
 })(typeof self !== "undefined" ? self : this);

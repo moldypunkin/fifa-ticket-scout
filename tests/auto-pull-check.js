@@ -144,7 +144,21 @@ check("Total Seats counts exportable seats only", lines.includes("# Total Seats:
 check("no Auto line from the button", !r.csv.includes("# Auto:"));
 check("Auto line from an auto-pull", build(game, Object.assign({ auto: true }, opts)).csv.includes("\n# Auto: yes\n"));
 check("cheapest first, comma area quoted",
-  lines[lines.indexOf("Block,Area,Row,Seat,Seat_Range,Category,Tier,Price_USD,Exclusive") + 1] === '101,"Lower, East",2,1,,C,Lower (100s),10.00,true');
+  lines[lines.indexOf("Block,Area,Row,Seat,Seat_Range,Category,Tier,Price_USD,Exclusive,Type") + 1] === '101,"Lower, East",2,1,,C,Lower (100s),10.00,true,');
+const lt = ctx.scoutListingType;
+check("Type: Ticketmaster at face is primary", lt("ticketmaster", "standard") === "primary");
+check("Type: Ticketmaster resale is resale", lt("ticketmaster", "resale") === "resale");
+check("Type: Ticketmaster Account Manager is primary", lt("ticketmaster", "primary") === "primary");
+check("Type: AXS offer category is primary, Flash Seats resale", lt("axs", "P4") === "primary" && lt("axs", "resale") === "resale");
+check("Type: SeatGeek exchange / marketplace / fan_to_fan are resale",
+  lt("seatgeek", "exchange") === "resale" && lt("seatgeek", "marketplace") === "resale" && lt("seatgeek", "fan_to_fan") === "resale");
+check("Type: SeatGeek CAN be primary", lt("seatgeek", "primary") === "primary");
+check("Type: an unseen SeatGeek channel is unknown, not resale", lt("seatgeek", "something_new") === "" && lt("seatgeek", "C") === "");
+check("Type: box offices and FIFA LMS are primary", lt("evenue", "primary") === "primary" && lt("lms", "CAT 1") === "primary" && lt("rutheckerd", "") === "primary");
+check("Type: marketplaces and FIFA resale are resale", lt("stubhub", "resale") === "resale" && lt("vividseats", "resale") === "resale" && lt("resale", "CAT 2") === "resale");
+check("Type: an unknown site is blank", lt("somewhere", "x") === "");
+check("Type: written on each row, from the seat's own site",
+  build({ site: "ticketmaster", match: game.match, seats: { a: { block: "1", area: "", row: "1", seat: "1", category: "resale", price: 1000, exclusive: true, site: "ticketmaster" } } }, opts).csv.trim().endsWith(",resale"));
 check("filename = site_match_stamp", r.filename === "seatgeek_Chiefs_vs__Broncos_20261101_0905.csv", r.filename);
 check("nothing to export -> null", build({ seats: {} }, opts) === null && build(null, opts) === null);
 check("popup loads csv-export.js before popup.js",
