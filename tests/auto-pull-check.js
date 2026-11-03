@@ -185,6 +185,18 @@ check("scan progress reaches the auto-pull", /autoPull\[tabId\]\.scanStatus = me
 // but it must never open one.
 const block = bg.slice(bg.indexOf("// ==== auto-pull"), bg.indexOf("// ==== auto-pull — END"));
 check("auto-pull never opens a tab", !/chrome\.tabs\.create|chrome\.windows\.create|tabs\.update/.test(block));
+// #ts-keep (v3.5.1): Shadow-board pulls leave the page open; every other pull still closes it.
+const keepSrc = bg.match(/const AUTO_KEEP_RE = (\/.*\/);/);
+const keepRe = keepSrc ? eval(keepSrc[1]) : null;
+check("background reads the #ts-keep marker", !!keepRe);
+if (keepRe) {
+  check("keep: after ts-auto", keepRe.test("https://x.com/e#ts-auto&ts-keep"));
+  check("keep: a plain auto-pull is not kept", !keepRe.test("https://x.com/e#ts-auto"));
+  check("keep: not a lookalike", !keepRe.test("https://x.com/e#ts-auto&ts-keeper") && !keepRe.test("https://x.com/ts-keep"));
+}
+const exp = extractFn(bg, "autoPullExport");
+check("export closes the tab only when not kept", /if \(keep\)[^\n]*\n\s*else chrome\.tabs\.remove\(tabId\)/.test(exp.replace(/\r/g, "")));
+
 
 out(`\n${fail ? fail + " FAILED" : "all passed"}`);
 process.exit(fail ? 1 : 0);

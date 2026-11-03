@@ -667,11 +667,16 @@ function autoBadge(tabId, text, title) {
   } catch (e) { /* a badge must never break the pull */ }
 }
 
+const AUTO_KEEP_RE = /[#&]ts-keep(&|=|$)/;
+
 function autoPullArm(tabId, url) {
   if (tabId == null) return;
   autoPull[tabId] = {
     armedAt: Date.now(), url: url || "", freshFor: null, scanStatus: null,
     lastCount: -1, stableSince: Date.now(), scanStarted: false, loadedAt: null, done: false,
+    // #ts-keep (TicketPortal's Shadow board): download as usual but leave the page open,
+    // so the person can check flagged listings against it after the import.
+    keep: AUTO_KEEP_RE.test(url || ""),
   };
   bgLog(`[auto-pull] armed tab ${tabId}: ${url}`);
   autoBadge(tabId, "⇣", "Ticket Scout: waiting for the listings to finish loading, then downloading the CSV");
@@ -744,9 +749,11 @@ async function autoPullExport(tabId, gameKey, game) {
   // the folder the portal watches.
   const url = "data:text/csv;charset=utf-8," + encodeURIComponent(out.csv);
   await chrome.downloads.download({ url, filename: out.filename, conflictAction: "uniquify", saveAs: false });
-  bgLog(`[auto-pull] tab ${tabId}: downloaded ${out.filename} (${out.count} seats) — closing the tab`);
+  const keep = !!job.keep;
+  bgLog(`[auto-pull] tab ${tabId}: downloaded ${out.filename} (${out.count} seats) — ${keep ? "keeping the tab open" : "closing the tab"}`);
   delete autoPull[tabId];
-  chrome.tabs.remove(tabId).catch(() => {});
+  if (keep) autoBadge(tabId, "✓", `Ticket Scout downloaded ${out.filename}`);
+  else chrome.tabs.remove(tabId).catch(() => {});
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => { delete autoPull[tabId]; });

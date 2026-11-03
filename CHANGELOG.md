@@ -4,6 +4,17 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## November 3, 2026 — v3.5.1
+
+### Shadow Pulls Leave the Page Open
+
+An auto-pull still downloads the CSV by itself, but when TicketPortal adds `#ts-keep` after `#ts-auto`
+the tab stays open afterwards (the icon shows **✓**), so flagged listings can be checked against the
+page after the import. TicketPortal adds it only for pulls from the Shadow board; every other pull
+closes the tab as before. Older versions ignore the marker and close the tab.
+
+---
+
 ## October 29, 2026 — v3.5.0
 
 ### Every Row Says Primary or Resale
