@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "FIFA Ticket Scout",
-  "version": "3.5.1",
+  "version": "3.5.2",
   "description": "Real-time price tracking for FIFA World Cup 2026 resale tickets. See every seat, every price, at a glance.",
   "permissions": [
     "storage",
     "activeTab",
     "tabs",
     "alarms",
-    "downloads"
+    "downloads",
+    "scripting"
   ],
   "host_permissions": [
     "*://*.tickets.fifa.com/*",

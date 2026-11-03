@@ -4,6 +4,18 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## November 3, 2026 — v3.5.2
+
+### Checkout Survey
+
+A **Survey checkout page** button in the popup lists how the current page names its form fields and frames
+(tag, type, name, id, autocomplete hint, label) and copies it to the clipboard. It is step 1 of TicketPortal's
+checkout filler: the filler is written against what the survey shows. **It never reads what is typed in a
+field**, and a test fails if it ever does; hidden inputs are only counted and long digit runs are masked.
+Adds the `scripting` permission, which the survey needs to look inside the page's frames.
+
+---
+
 ## November 3, 2026 — v3.5.1
 
 ### Shadow Pulls Leave the Page Open

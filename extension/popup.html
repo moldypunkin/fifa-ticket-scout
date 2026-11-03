@@ -158,6 +158,9 @@
         </svg>
         Import Categories
       </button>
+      <button id="surveyBtn" class="btn btn-secondary" title="List how this checkout page names its fields (never what is typed in them) and copy it, for building the checkout filler">
+        Survey checkout page
+      </button>
       <button id="clearBtn" class="btn btn-danger">
         <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M2 4h12M5 4V3a1 1 0 011-1h4a1 1 0 011 1v1m2 0v9a1 1 0 01-1 1H4a1 1 0 01-1-1V4h10z"/>
@@ -168,6 +171,7 @@
 
     <!-- Result of the last category import, and the control to clear it. -->
     <div id="importStatus" class="import-status"></div>
+    <div id="surveyStatus" class="import-status"></div>
     <!-- Kept out of the actions row: a bare file input cannot be styled to
          match the buttons, so importBtn clicks this instead. -->
     <input type="file" id="importFile" accept=".csv,text/csv" hidden>
@@ -225,6 +229,7 @@
   <script src="tiers.js"></script>
   <script src="venue-import.js"></script>
   <script src="csv-export.js"></script>
+  <script src="checkout-survey.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

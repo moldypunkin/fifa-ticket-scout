@@ -88,6 +88,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // The same action from the empty state, where it is needed most: a capture
   // that produced nothing is the case you cannot diagnose without the logs.
   onClick("emptyLogsBtn", downloadLogs);
+  onClick("surveyBtn", surveyCheckout);
   initCategoryImport();
 
   // Clear data
@@ -3870,4 +3871,32 @@ function renderInsightsChart() {
       requestAnimationFrame(() => { el.style.height = target; });
     });
   });
+}
+
+// Checkout survey (v3.5.2): run surveyCheckoutFrame (checkout-survey.js) in every frame
+// of this tab and copy the result. It lists how fields are named, never what is in them.
+// A frame on a site this extension has no access to (a payment processor's card box) is
+// not readable; the parent frame still lists it under iframes, which is what we need to
+// know which site to ask for next.
+async function surveyCheckout() {
+  const status = document.getElementById("surveyStatus");
+  const say = (t) => { if (status) status.textContent = t; };
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !tab.id) { say("No page to survey."); return; }
+    let results;
+    try {
+      results = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: surveyCheckoutFrame });
+    } catch (e) {
+      // Some frames refuse; the top frame alone is still worth having.
+      results = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: surveyCheckoutFrame });
+    }
+    const frames = (results || []).map((r) => r && r.result).filter(Boolean);
+    const report = { survey: "checkout", version: chrome.runtime.getManifest().version, at: new Date().toISOString(), frames };
+    await navigator.clipboard.writeText(JSON.stringify(report, null, 1));
+    const n = frames.reduce((a, f) => a + f.fields.length, 0);
+    say(`Copied: ${frames.length} frame(s), ${n} field(s). Paste it to Claude. No typed values are included.`);
+  } catch (e) {
+    say("Survey failed: " + (e && e.message ? e.message : e));
+  }
 }
