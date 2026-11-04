@@ -4,6 +4,25 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## November 4, 2026 — v3.6.0
+
+### Ticketmaster Checkout Fill
+
+In TicketPortal's Purchasing tab, **⇢ Load for checkout** on a login hands that account's card and billing
+details to Ticket Scout. On a Ticketmaster checkout a small panel shows which account is loaded (masked email,
+card brand and last four, name) with **Fill** and **Clear**. Fill types the name on card, card number, expiry,
+security code, billing address, city, postal code, state, country (only if empty) and phone.
+
+- **You still press Place order.** The fill never clicks a button, submits, or touches the payment-method
+  choice, "save this card" or the reCAPTCHA; the only thing it picks is the State/Country entry in the
+  type-ahead list. `tests/checkout-fill-check.js` fails if that changes.
+- **Nothing is written to disk.** The account is held in memory (`chrome.storage.session`) for 10 minutes,
+  then cleared; Clear removes it at once. Content scripts never see the card number, only the masked label.
+- Accepts accounts only from TicketPortal's own page, and sends the card only into Ticketmaster's payment
+  frames (`payments-cc.ticketmaster.com`, `payments.ticketmaster.com`).
+
+---
+
 ## November 3, 2026 — v3.5.2
 
 ### Checkout Survey

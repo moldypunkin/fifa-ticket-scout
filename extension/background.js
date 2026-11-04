@@ -5,7 +5,7 @@
 // scripts with no deps, so importScripts is safe at service-worker top level.
 // NOTE: VenueTiers is about SEAT tiers; the TIERS constant below is LICENSE
 // tiers. Different things.
-importScripts("venue-tiers.js", "tiers.js", "venue-import.js", "csv-export.js");
+importScripts("venue-tiers.js", "tiers.js", "venue-import.js", "csv-export.js", "checkout-fill.js");
 
 // The shipped mapping, before any user import overlays it.
 const SHIPPED_VENUE_TIER_DATA = self.VENUE_TIER_DATA;
@@ -5300,3 +5300,81 @@ function getStorage() {
     chrome.storage.local.get(null, (data) => resolve(data || {}));
   });
 }
+
+// ==== checkout fill — BEGIN (v3.6.0) ====
+// TicketPortal's "⇢ Load for checkout" posts one account's card to
+// portal-bridge.js, which sends CHECKOUT_LOAD here. It is held in
+// chrome.storage.session (memory only, gone when Chrome closes, unreadable by
+// content scripts) for CHECKOUT_TTL_MIN, then cleared. The checkout panel only
+// ever gets a masked label (CHECKOUT_STATUS); the card goes straight from here
+// into the card frame (CHECKOUT_FILL), and only into a frame on
+// CHECKOUT_FILL_ORIGINS. Card values are never passed to bgLog.
+const CHECKOUT_PORTAL_ORIGIN = "https://melodic-belekoy-ba321e.netlify.app";
+const CHECKOUT_TTL_MIN = 10;
+const CHECKOUT_KEY = "checkoutCard";
+const TM_PAGE_RE = /^https:\/\/([a-z0-9-]+\.)*ticketmaster\.com\//;
+
+function checkoutCardOk(c) {
+  if (!c || typeof c !== "object") return false;
+  const cc = String(c.cc || "").replace(/\D/g, "");
+  const cvv = String(c.cvv || "").replace(/\D/g, "");
+  return cc.length >= 12 && cc.length <= 19 && cvv.length >= 3 && cvv.length <= 4 && !!formatExpiry(c.exp);
+}
+async function checkoutGet() {
+  const got = await chrome.storage.session.get(CHECKOUT_KEY);
+  const held = got && got[CHECKOUT_KEY];
+  if (!held) return null;
+  if (!(held.expiresAt > Date.now())) { await checkoutClear(); return null; }
+  return held;
+}
+async function checkoutClear() {
+  await chrome.storage.session.remove(CHECKOUT_KEY);
+  chrome.alarms.clear("checkout-expire");
+}
+async function checkoutLoad(card, sender) {
+  if (!sender || !sender.url || sender.url.indexOf(CHECKOUT_PORTAL_ORIGIN + "/") !== 0) return { ok: false, error: "not from TicketPortal" };
+  if (!checkoutCardOk(card)) return { ok: false, error: "card details incomplete (number, security code or expiry)" };
+  const keep = { cc: card.cc, cvv: card.cvv, exp: card.exp, name: card.name, brand: card.brand, email: card.email,
+    address1: card.address1, address2: card.address2, city: card.city, state: card.state, zip: card.zip, phone: card.phone };
+  const expiresAt = Date.now() + CHECKOUT_TTL_MIN * 60000;
+  await chrome.storage.session.set({ [CHECKOUT_KEY]: { card: keep, label: checkoutLabel(keep), expiresAt } });
+  chrome.alarms.create("checkout-expire", { when: expiresAt });
+  bgLog("[checkout] account loaded for " + CHECKOUT_TTL_MIN + " min");
+  return { ok: true, minutes: CHECKOUT_TTL_MIN };
+}
+async function checkoutStatus() {
+  const held = await checkoutGet();
+  return held ? { loaded: true, label: held.label, expiresAt: held.expiresAt } : { loaded: false };
+}
+async function checkoutFill(sender) {
+  if (!sender || !sender.tab || sender.frameId !== 0 || !TM_PAGE_RE.test(sender.url || "")) return { error: "not a Ticketmaster page" };
+  const held = await checkoutGet();
+  if (!held) return { error: "Nothing loaded — use ⇢ Load for checkout in TicketPortal first." };
+  const tabId = sender.tab.id;
+  let probes = [];
+  try { probes = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: checkoutFrameProbe }); }
+  catch (e) { return { error: "Could not read the page: " + (e && e.message) }; }
+  const frameIds = probes.filter((p) => p && p.result && p.result.fields > 0 && CHECKOUT_FILL_ORIGINS.indexOf(p.result.origin) >= 0).map((p) => p.frameId);
+  if (!frameIds.length) return { error: "No card form found — choose Credit / Debit Card first." };
+  const runs = await chrome.scripting.executeScript({ target: { tabId, frameIds }, func: fillCheckoutFrame,
+    args: [checkoutFillData(held.card), CHECKOUT_FILL_ORIGINS] });
+  const filled = [], missed = [];
+  for (const r of runs || []) {
+    const res = r && r.result;
+    if (!res) continue;
+    (res.filled || []).forEach((k) => filled.indexOf(k) < 0 && filled.push(k));
+    (res.missed || []).forEach((k) => missed.indexOf(k) < 0 && missed.push(k));
+  }
+  bgLog("[checkout] filled " + filled.length + ", missed: " + (missed.join(", ") || "none"));
+  return { filled, missed: missed.filter((k) => filled.indexOf(k) < 0) };
+}
+chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === "checkout-expire") checkoutClear(); });
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const t = message && message.type;
+  if (t === "CHECKOUT_LOAD") { checkoutLoad(message.card, sender).then(sendResponse); return true; }
+  if (t === "CHECKOUT_STATUS") { checkoutStatus().then(sendResponse); return true; }
+  if (t === "CHECKOUT_CLEAR") { checkoutClear().then(() => sendResponse({ ok: true })); return true; }
+  if (t === "CHECKOUT_FILL") { checkoutFill(sender).then(sendResponse, (e) => sendResponse({ error: "Fill failed: " + (e && e.message) })); return true; }
+  return false;
+});
+// ==== checkout fill — END ====
