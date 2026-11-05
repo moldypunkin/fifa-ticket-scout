@@ -38,12 +38,20 @@
 
   // game: one entry of chrome.storage.local.games
   // opts: { gameKey, now: Date, priceUSD(cents), tierFor(venue, block, row),
-  //         fileTag(site), auto: bool }
+  //         fileTag(site), auto: bool, expand(seats) }
   // Returns { csv, filename, count }, or null when there is nothing to export.
   function buildScoutCsv(game, opts) {
     if (!game) return null;
     const o = opts || {};
-    const seats = Object.values(game.seats || {}).filter((s) => s.exclusive !== false && s.price != null);
+    // One stored record can stand for several tickets (a Ticketmaster GA
+    // section is a section and a count), and the file is one row per ticket,
+    // so the records are expanded first. Passed in like the fee maths and the
+    // tier lookup rather than read off a global, so this file still loads on
+    // its own; with no expander the rows are the records, which is what every
+    // source but Ticketmaster's unplaced listings stores anyway.
+    const expand = typeof o.expand === "function" ? o.expand : function (x) { return x; };
+    const seats = expand(
+      Object.values(game.seats || {}).filter((s) => s.exclusive !== false && s.price != null));
     if (seats.length === 0) return null;
 
     const match = game.match || null;

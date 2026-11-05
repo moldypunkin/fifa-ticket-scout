@@ -702,8 +702,12 @@ function renderDealsTab() {
     const games = (data && data.games) || {};
     const key = currentPerfId || Object.keys(games)[0];
     const game = games[key];
+    // Expanded like the dashboard's own read: the Best Value tab scores
+    // listings against their peers, and a GA section left as one record would
+    // weigh the same as somebody's single resale seat.
     const seats = game
-      ? Object.values(game.seats || {}).filter((s) => s.exclusive !== false && s.price != null)
+      ? expandSeatCounts(
+          Object.values(game.seats || {}).filter((s) => s.exclusive !== false && s.price != null))
       : [];
 
     if (seats.length < 2) {
@@ -870,7 +874,20 @@ function renderDashboard(game) {
     });
   }
 
-  const allSeats = Object.values(game.seats || {}).filter(s => s.exclusive !== false && s.price != null);
+  // Expanded once, here, before anything reads it. A stored record can stand
+  // for several tickets — Ticketmaster publishes a GA section as a section and
+  // a count, with no seats named — and every figure below counts rows: the
+  // stats bar, the category tabs, the histogram, Best Deals, the block table.
+  // Expanding in one place is the same reason the section filter is applied in
+  // one place: it is what stops them disagreeing with each other.
+  const allSeats = expandSeatCounts(
+    Object.values(game.seats || {}).filter(s => s.exclusive !== false && s.price != null));
+  // Unreachable on any real venue, and reported rather than passed off as the
+  // whole figure if it ever is — which is the mistake the old 200 ceiling made.
+  if (allSeats.truncated && allSeats.truncated.length) {
+    console.warn("[popup] seat counts too large to draw in full: " +
+      allSeats.truncated.map((t) => `${t.block} showing ${t.used} of ${t.want}`).join(", "));
+  }
   const match = game.match;
 
   // Filtered once, here: everything below draws from the same list, so the
@@ -1981,6 +1998,7 @@ function exportCSV() {
       priceUSD: centsToUSD,
       tierFor: VenueTiers.tierFor,
       fileTag: siteFileTag,
+      expand: expandSeatCounts,
     });
     if (!out) return;
 

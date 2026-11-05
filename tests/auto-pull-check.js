@@ -116,7 +116,9 @@ check("first save after arming replaces", same(Object.keys(mergeSeats(old, { c: 
 check("later saves merge", same(Object.keys(mergeSeats({ c: {} }, { d: {} }, 7, "k")).sort(), ["c", "d"]));
 check("another tab is untouched", same(Object.keys(mergeSeats(old, { c: {} }, 8, "k")).sort(), ["a", "b", "c"]));
 const rawMerges = (bg.match(/games\[gameKey\]\.seats = \{ \.\.\.games\[gameKey\]\.seats, \.\.\.seats \};/g) || []).length;
-const viaHelper = (bg.match(/games\[gameKey\]\.seats = mergeSeats\(games\[gameKey\]\.seats, seats, tabId, gameKey\);/g) || []).length;
+// `kept` is the Ticketmaster path, which sheds the one-record-per-ticket keys
+// an earlier version wrote before merging. It still goes through the helper.
+const viaHelper = (bg.match(/games\[gameKey\]\.seats = mergeSeats\((?:games\[gameKey\]\.seats|kept), seats, tabId, gameKey\);/g) || []).length;
 // The count rises by one with each new source; rawMerges === 0 is the part
 // that matters, and the number keeps a new save path from quietly skipping it.
 check("every save path goes through mergeSeats", rawMerges === 0 && viaHelper === 13, `${rawMerges} raw, ${viaHelper} via helper`);
@@ -166,6 +168,11 @@ check("popup loads csv-export.js before popup.js",
 check("background imports csv-export.js", /importScripts\([^)]*"csv-export\.js"/.test(bg));
 check("popup's button uses the builder", /buildScoutCsv\(game, \{/.test(extractFn(popup, "exportCSV")));
 check("background's auto-pull uses the builder", /buildScoutCsv\(game, \{/.test(extractFn(bg, "autoPullExport")));
+// A stored record can stand for many tickets. Neither caller may leave the
+// expander out: the file is one row per ticket, and a GA section would
+// otherwise export as a single row while the dashboard shows its full count.
+check("the button expands seat counts", /expand: expandSeatCounts/.test(extractFn(popup, "exportCSV")));
+check("so does the auto-pull", /expand: expandSeatCounts/.test(extractFn(bg, "autoPullExport")));
 
 out("\n--- wiring ---");
 check("manifest has the downloads permission", (mf.permissions || []).includes("downloads"));

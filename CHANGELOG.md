@@ -4,6 +4,79 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## November 5, 2026 — v3.7.0
+
+### GA Sections Were All Reading Exactly 200
+
+Reported from two unrelated events whose GA section each showed 200 tickets available. 200 was not what either
+section held — it was a ceiling, and both were sitting on it.
+
+Ticketmaster publishes some inventory as a section and a count with no seat places: a resale listing that names
+no seats, or a GA section, which has none to name. That branch was added in v3.0.7 for the resale case, where
+counts run 2 to 4, and it clamped the count to 200 on the way in:
+
+```js
+const count = Math.max(1, Math.min(Number(facet.count) || 1, 200));
+```
+
+At two to four seats a listing the clamp is unreachable, which is presumably why it went in without comment. A
+GA section carries its entire allocation in that same field, so GA fell down the same branch and hit the
+ceiling every time. Nothing documented the clamp and nothing logged the raw figure, so the dashboard reported
+200 as fact and the logs agreed with it.
+
+**The ceiling is gone and the count is stored as published.** A section holding 1,500 reads 1,500.
+
+**One record now stands for many tickets.** The clamp was guarding something real: the branch stored one seat
+record per ticket, and `chrome.storage.local` has about 10MB with no `unlimitedStorage` permission to spend on
+a GA section's worth of near-identical copies. Those tickets are indistinguishable anyway — one block, one
+price, no row and no seat — so the copies held nothing a count does not. The parser writes one record
+carrying `count`, and the new `seat-counts.js` expands it back to one row per ticket at the point of use.
+
+Expansion happens at four read points, and nothing downstream changed: the stats bar, the category tabs, the
+histogram, Best Deals, the block table and the CSV all still count rows, so they cannot drift apart from each
+other.
+
+- `renderDashboard()` expands **before** the section filter, so the header and the rows under it agree.
+- The Best Value tab reads storage itself rather than taking the dashboard's list, so it expands separately —
+  a GA section left as one record would have scored as a single seat against its peers.
+- The CSV takes the expander through `opts.expand`, like the fee maths and the tier lookup, so `csv-export.js`
+  still loads on its own. Both the popup button and the auto-pull pass it; `tests/auto-pull-check.js` fails if
+  either stops.
+
+**A ceiling still exists, but a different kind.** One record expands to at most 50,000 rows — far above any
+real allocation, where 200 was not — and `expandSeatCounts()` reports anything it had to truncate instead of
+passing the short figure off as the whole. That reporting is the part the 200 clamp was missing.
+
+**An upgrade does not double-count.** The old shape keyed records `unplaced:<block>:<offer>:<index>`; the
+counted record drops the index, so it cannot overwrite them, and `mergeSeats` keeps whatever it does not
+overwrite. Without pruning, an install that had already scanned a GA event would carry the old copies beside
+the new record and count that section twice. The Ticketmaster save path sheds those keys and says how many.
+
+### Ticketmaster: The Counts Are Logged Now
+
+The figure behind an unplaced listing was never printed, which is why "200 available" could not be checked
+against anything. Two new lines, on every Ticketmaster scan that has them:
+
+```
+[background] Ticketmaster unplaced counts (as published, largest first): GA FLOOR×1500, 3×4, 206×2
+[background] Ticketmaster: 1 listing(s) hold 200+ tickets each (GA FLOOR×1500) — kept in full;
+             a 200 ceiling used to truncate these silently
+```
+
+The first is the line to read to find out what a GA section actually holds. The second only fires for listings
+of 200 or more, which is exactly the population the old clamp was rewriting.
+
+**One consequence worth knowing:** a GA section of 1,500 now exports 1,500 CSV rows where it exported 200.
+That matches every other source and the file's own `# Total Seats` header, but TicketPortal will see a step
+change in file size on GA events.
+
+`tests/seat-counts-check.js` pins the expansion contract — faithful counts, distinct row objects (the cluster
+builder tracks consumed seats by identity, so shared references would collapse to one), a nonsensical count
+reading as one ticket, the bound reporting rather than hiding a truncation, and all four readers expanding.
+`tests/tm-unplaced-facets-check.js` gained a 1,500-seat GA facet. 52 suites.
+
+---
+
 ## November 4, 2026 — v3.6.0
 
 ### Ticketmaster Checkout Fill

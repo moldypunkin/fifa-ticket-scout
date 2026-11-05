@@ -5,7 +5,7 @@
 // scripts with no deps, so importScripts is safe at service-worker top level.
 // NOTE: VenueTiers is about SEAT tiers; the TIERS constant below is LICENSE
 // tiers. Different things.
-importScripts("venue-tiers.js", "tiers.js", "venue-import.js", "csv-export.js", "checkout-fill.js");
+importScripts("venue-tiers.js", "tiers.js", "venue-import.js", "seat-counts.js", "csv-export.js", "checkout-fill.js");
 
 // The shipped mapping, before any user import overlays it.
 const SHIPPED_VENUE_TIER_DATA = self.VENUE_TIER_DATA;
@@ -742,6 +742,7 @@ async function autoPullExport(tabId, gameKey, game) {
     tierFor: VenueTiers.tierFor,
     fileTag: siteFileTag,
     auto: true,
+    expand: expandSeatCounts,
   });
   if (!out) { autoPullGiveUp(tabId, "nothing to export"); return; }
   // A service worker has no URL.createObjectURL, so the file goes as a data:
@@ -1529,6 +1530,11 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
   let unplacedSeats = 0;
   let unplacedSeq = 0;
   const unplacedSections = new Set();
+  // Every unplaced listing's own count, for the log. A GA section's whole
+  // allocation arrives this way and nothing ever printed the figure, so when
+  // the dashboard read "200 available" there was no way to tell a section
+  // holding exactly 200 from one holding 1,500.
+  const unplacedCounts = [];
   try {
     for (const facet of facetsData.facets) {
       if (facet.available === false) continue;
@@ -1610,28 +1616,46 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
       // everywhere else in the popup.
       if (!placedHere) {
         const block = String(facet.section || "");
-        const count = Math.max(1, Math.min(Number(facet.count) || 1, 200));
+        // The count as published, with no ceiling.
+        //
+        // This was Math.min(..., 200). The clamp was written for the resale
+        // listings described above, whose counts run 2 to 4, where 200 is
+        // unreachable — but a GA section publishes no seat places either and
+        // carries its entire allocation here, so GA fell down the same branch
+        // and sat on the ceiling. Two unrelated events both reported exactly
+        // "200 available", which was the clamp showing through rather than
+        // anything true about either section. Nothing documented the clamp and
+        // nothing logged the real number, so it read as fact.
+        const raw = Number(facet.count);
+        const count = isFinite(raw) && raw >= 1 ? Math.floor(raw) : 1;
         if (block) {
           // The offer id keeps two listings in the same section apart; without
           // it the second would overwrite the first.
           const offerKey = (Array.isArray(facet.offers) && facet.offers[0]) || `f${unplacedSeq++}`;
-          for (let i = 0; i < count; i++) {
-            seats[`unplaced:${block}:${offerKey}:${i}`] = {
-              block,
-              row: "",
-              seat: "",
-              area,
-              category,
-              tier: VenueTiers.tierFor(venueName, block, ""),
-              price,
-              exclusive: true,
-              site: "ticketmaster",
-              accessible: (facet.accessibility || []).length > 0,
-              attributes: facet.attributes || [],
-            };
-          }
+          // ONE record carrying its count, not `count` copies of it. These
+          // tickets are indistinguishable — one block, one price, no row and
+          // no seat — so the copies held nothing the count does not, and
+          // chrome.storage.local has ~10MB with no unlimitedStorage permission
+          // to spend on a GA section's worth of them. expandSeatCounts() in
+          // seat-counts.js puts the rows back at the point of use, which is
+          // what makes dropping the ceiling affordable.
+          seats[`unplaced:${block}:${offerKey}`] = {
+            block,
+            row: "",
+            seat: "",
+            area,
+            category,
+            tier: VenueTiers.tierFor(venueName, block, ""),
+            price,
+            exclusive: true,
+            site: "ticketmaster",
+            accessible: (facet.accessibility || []).length > 0,
+            attributes: facet.attributes || [],
+            count,
+          };
           unplacedSeats += count;
           unplacedSections.add(block);
+          unplacedCounts.push({ block, count });
         }
       }
     }
@@ -1669,6 +1693,22 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
       bgLog(`[background] Ticketmaster: ${emptyFacets.length} listing(s) published no seat ` +
         `places — ${unplacedSeats} seat(s) across ${unplacedSections.size} section(s) kept ` +
         `from their counts instead, with no row or seat number`);
+      // The raw counts, largest first. This is the line to read to find out
+      // what a GA section actually holds: the dashboard draws one row per
+      // ticket, and this is the figure those rows were built from.
+      const biggest = unplacedCounts.slice().sort((a, b) => b.count - a.count);
+      bgLog(`[background] Ticketmaster unplaced counts (as published, largest first): ` +
+        biggest.slice(0, 20).map((u) => `${u.block}\u00d7${u.count}`).join(", ") +
+        (biggest.length > 20 ? `, +${biggest.length - 20} more` : ""));
+      // Worth its own line: a listing this size is a GA allocation rather than
+      // somebody's pair of resale seats, and anything at or above 200 used to
+      // be cut to exactly 200 with nothing said about it.
+      const bulk = biggest.filter((u) => u.count >= 200);
+      if (bulk.length) {
+        bgLog(`[background] Ticketmaster: ${bulk.length} listing(s) hold 200+ tickets each ` +
+          `(${bulk.slice(0, 8).map((u) => `${u.block}\u00d7${u.count}`).join(", ")}) — ` +
+          `kept in full; a 200 ceiling used to truncate these silently`);
+      }
       // A listing with no section at all cannot be filed anywhere, so it stays
       // dropped — but it is still inventory the dashboard is not showing.
       const stillMissing = emptyFacets
@@ -1770,7 +1810,20 @@ async function saveTicketmasterSeats(eventId, facetsData, tabId, site, eventInfo
   bgLog(`[background] Ticketmaster: ${total} seats parsed` +
     (missingPrice ? `, ${missingPrice} facets had no resolvable price` : ""));
 
-  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
+  const kept = {};
+  let shed = 0;
+  for (const key of Object.keys(games[gameKey].seats || {})) {
+    // unplaced:<block>:<offer>:<index> — the one-record-per-ticket shape this
+    // branch used to write. The counted record is keyed without the trailing
+    // index, so it cannot overwrite them and they would be counted twice.
+    if (/^unplaced:.*:\d+$/.test(key)) { shed++; continue; }
+    kept[key] = games[gameKey].seats[key];
+  }
+  if (shed) {
+    bgLog(`[background] Ticketmaster: dropped ${shed} seat(s) that an earlier version stored ` +
+      `one per ticket — this scan stores the same inventory as a count instead`);
+  }
+  games[gameKey].seats = mergeSeats(kept, seats, tabId, gameKey);
   games[gameKey].site = site;
   games[gameKey].lastScanned = Date.now();
 
