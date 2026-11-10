@@ -4,6 +4,29 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## November 10, 2026 — v3.8.0
+
+### Accessible Seats Are Left Out of the CSV
+
+Wheelchair, ADA, handicapped and companion seats are no longer written to the export (the team does not buy or
+shadow them). A seat counts when the site's own accessibility data flagged it, or its section, area or
+attributes say ADA, wheelchair, handicap(ped) or accessible. They still show in the popup; only the file drops
+them, and a `# Accessible Excluded: N` header line says how many. TicketPortal ignores unknown header lines.
+
+### Limited-View Seats Are Marked in the CSV
+
+The export gains a last column, **View**, which reads `limited` when a seat's own attributes (or its area
+text) say the view is obstructed, limited, partial, restricted, side or rear. TicketPortal uses it to decide
+whether a limited-view seat counts as backing for a shadow listing (St. Augustine, where many listings are
+limited view). The attributes were already collected on Ticketmaster, AXS, TickPick, Vivid, GoTickets,
+GameTime and TicketsForLess; they simply never reached the file.
+
+Blank means nothing said the view was limited, not that it was checked clear. "Age Restricted" and "Restricted
+Area" do not count: only "restricted" next to "view". The column is last, so anything reading the file by
+column position is unaffected, and older portal versions ignore it.
+
+---
+
 ## November 5, 2026 — v3.7.0
 
 ### GA Sections Were All Reading Exactly 200

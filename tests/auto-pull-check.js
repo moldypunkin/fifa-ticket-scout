@@ -146,7 +146,37 @@ check("Total Seats counts exportable seats only", lines.includes("# Total Seats:
 check("no Auto line from the button", !r.csv.includes("# Auto:"));
 check("Auto line from an auto-pull", build(game, Object.assign({ auto: true }, opts)).csv.includes("\n# Auto: yes\n"));
 check("cheapest first, comma area quoted",
-  lines[lines.indexOf("Block,Area,Row,Seat,Seat_Range,Category,Tier,Price_USD,Exclusive,Type") + 1] === '101,"Lower, East",2,1,,C,Lower (100s),10.00,true,');
+  lines[lines.indexOf("Block,Area,Row,Seat,Seat_Range,Category,Tier,Price_USD,Exclusive,Type,View") + 1] === '101,"Lower, East",2,1,,C,Lower (100s),10.00,true,,');
+// Accessible seats (v3.8.0): never exported.
+const acc = ctx.scoutIsAccessibleSeat;
+check("ADA: the adapter's accessible flag", acc({ accessible: true }) === true);
+check("ADA: section / area / attribute wording",
+  acc({ block: "ADA 101" }) && acc({ area: "Wheelchair Accessible" }) && acc({ attributes: ["Handicapped Seating"] })
+  && acc({ attributes: [{ name: "Wheelchair Companion" }] }) && acc({ attributes: ["ACCESSIBLE"] }));
+check("ADA: ordinary seats are kept", !acc({ block: "101", area: "Lower Level", attributes: ["Obstructed View", "Mobile Transfer"] })
+  && !acc({}) && !acc(null) && !acc({ block: "CANADA CLUB" }) && !acc({ block: "Adams Terrace" }));
+const adaGame = { site: "ticketmaster", match: game.match, seats: {
+  a: { block: "101", area: "", row: "1", seat: "1", category: "standard", price: 1000, exclusive: true },
+  b: { block: "101", area: "", row: "1", seat: "2", category: "standard", price: 900, exclusive: true, accessible: true },
+  c: { block: "ADA", area: "", row: "1", seat: "3", category: "standard", price: 800, exclusive: true } } };
+const adaCsv = build(adaGame, opts).csv;
+check("ADA: left out of the file, and the header says how many",
+  adaCsv.includes("# Total Seats: 1") && adaCsv.includes("# Accessible Excluded: 2") && adaCsv.split("\n").filter((l) => /^101,|^ADA,/.test(l)).length === 1);
+check("ADA: a file of only accessible seats is nothing to export",
+  build({ site: "ticketmaster", match: game.match, seats: { b: adaGame.seats.b } }, opts) === null);
+check("ADA: no line when nothing was dropped", !r.csv.includes("# Accessible Excluded"));
+// View (v3.8.0): limited-view seats, for TicketPortal's "Limited view counts as backing" switch.
+const lv = ctx.scoutListingView;
+check("View: AXS 'Restricted/Obstructed View' is limited", lv({ attributes: ["Restricted/Obstructed View"] }) === "limited");
+check("View: GoTickets / TickPick names are limited", lv({ attributes: ["Obstructed View"] }) === "limited" && lv({ attributes: ["ObstructedView"] }) === "limited");
+check("View: object attributes are read", lv({ attributes: [{ name: "Limited View" }] }) === "limited" && lv({ attributes: [{ description: "partial view" }] }) === "limited");
+check("View: code-style values", lv({ attributes: ["LIMITED_VIEW"] }) === "limited" && lv({ attributes: ["side-view"] }) === "limited");
+check("View: the area text counts", lv({ area: "Upper Level - Limited View", attributes: [] }) === "limited");
+check("View: 'Age Restricted' / 'Restricted Area' are NOT about the view",
+  lv({ attributes: ["Age Restricted", "Restricted Area", "Mobile Transfer", "Wheelchair Accessible"] }) === "");
+check("View: nothing said -> blank", lv({}) === "" && lv(null) === "" && lv({ attributes: [null, 3] }) === "");
+check("View: written on each row",
+  build({ site: "axs", match: game.match, seats: { a: { block: "330", area: "", row: "40", seat: "", category: "P1", price: 1000, exclusive: true, attributes: ["Restricted/Obstructed View"] } } }, opts).csv.trim().endsWith(",primary,limited"));
 const lt = ctx.scoutListingType;
 check("Type: Ticketmaster at face is primary", lt("ticketmaster", "standard") === "primary");
 check("Type: Ticketmaster resale is resale", lt("ticketmaster", "resale") === "resale");
@@ -160,7 +190,7 @@ check("Type: box offices and FIFA LMS are primary", lt("evenue", "primary") === 
 check("Type: marketplaces and FIFA resale are resale", lt("stubhub", "resale") === "resale" && lt("vividseats", "resale") === "resale" && lt("resale", "CAT 2") === "resale");
 check("Type: an unknown site is blank", lt("somewhere", "x") === "");
 check("Type: written on each row, from the seat's own site",
-  build({ site: "ticketmaster", match: game.match, seats: { a: { block: "1", area: "", row: "1", seat: "1", category: "resale", price: 1000, exclusive: true, site: "ticketmaster" } } }, opts).csv.trim().endsWith(",resale"));
+  build({ site: "ticketmaster", match: game.match, seats: { a: { block: "1", area: "", row: "1", seat: "1", category: "resale", price: 1000, exclusive: true, site: "ticketmaster" } } }, opts).csv.trim().endsWith(",resale,"));
 check("filename = site_match_stamp", r.filename === "seatgeek_Chiefs_vs__Broncos_20261101_0905.csv", r.filename);
 check("nothing to export -> null", build({ seats: {} }, opts) === null && build(null, opts) === null);
 check("popup loads csv-export.js before popup.js",

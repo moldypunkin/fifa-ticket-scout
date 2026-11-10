@@ -36,6 +36,42 @@
     return "";
   }
 
+  // LIMITED VIEW for one seat, written as the export's View column (v3.8.0) so TicketPortal can decide whether
+  // a limited-view seat counts as backing for a shadow. "limited" when the seat's OWN attributes, or its area
+  // text, say the view is obstructed / limited / partial / restricted / side / rear; "" otherwise (which means
+  // "nothing said so", not "proven clear"). Attributes are strings on most sites and {name}/{description}
+  // objects on some, so both are read. Plain "restricted" alone is NOT enough: "Age Restricted" and
+  // "Restricted Area" are not about the view.
+  const LIMITED_VIEW_RE = /obstruct|(limited|partial|restricted|side|rear)[\s_-]*view|view[\s_-]*(is[\s_-]*)?(limited|obstructed|restricted|partial)/i;
+  function listingView(seat) {
+    const s = seat || {};
+    const attrs = Array.isArray(s.attributes) ? s.attributes : [];
+    for (const a of attrs) {
+      const text = String(a && typeof a === "object" ? (a.name || a.description || "") : (a == null ? "" : a));
+      if (LIMITED_VIEW_RE.test(text)) return "limited";
+    }
+    return LIMITED_VIEW_RE.test(String(s.area || "")) ? "limited" : "";
+  }
+
+  // ACCESSIBLE seating (v3.8.0, the team's ask): wheelchair / ADA / handicapped seats and their companion seats
+  // are NOT written to the export at all. The team does not buy or shadow them, and as backing or a cheap get-in
+  // they misled the portal. A seat is accessible when its adapter flagged it (`accessible`, from the site's own
+  // accessibility data), or its section, area or attributes say ADA / wheelchair / handicap(ped) / accessible.
+  // The seats stay in the extension's own store and popup; only the file leaves them out, and its header says
+  // how many it dropped.
+  const ACCESSIBLE_RE = /\bada\b|wheel\s*chair|handicap|accessib/i;
+  function isAccessibleSeat(seat) {
+    const s = seat || {};
+    if (s.accessible === true) return true;
+    if (ACCESSIBLE_RE.test(String(s.block || "")) || ACCESSIBLE_RE.test(String(s.area || ""))) return true;
+    const attrs = Array.isArray(s.attributes) ? s.attributes : [];
+    for (const a of attrs) {
+      const text = String(a && typeof a === "object" ? (a.name || a.description || "") : (a == null ? "" : a));
+      if (ACCESSIBLE_RE.test(text)) return true;
+    }
+    return false;
+  }
+
   // game: one entry of chrome.storage.local.games
   // opts: { gameKey, now: Date, priceUSD(cents), tierFor(venue, block, row),
   //         fileTag(site), auto: bool, expand(seats) }
@@ -50,8 +86,10 @@
     // its own; with no expander the rows are the records, which is what every
     // source but Ticketmaster's unplaced listings stores anyway.
     const expand = typeof o.expand === "function" ? o.expand : function (x) { return x; };
-    const seats = expand(
+    const priced = expand(
       Object.values(game.seats || {}).filter((s) => s.exclusive !== false && s.price != null));
+    const seats = priced.filter((s) => !isAccessibleSeat(s));
+    const adaDropped = priced.length - seats.length;
     if (seats.length === 0) return null;
 
     const match = game.match || null;
@@ -70,6 +108,8 @@
       `# Performance ID: ${m.performanceId || o.gameKey}`,
       `# Exported: ${exportTime}`,
       `# Total Seats: ${seats.length}`,
+      // Accessible seats are left out of the file (see isAccessibleSeat); say so, so a short file is explained.
+      ...(adaDropped ? [`# Accessible Excluded: ${adaDropped}`] : []),
       // Says the file was written by an auto-pull rather than the button, so
       // the portal can tell which path a file came down.
       ...(o.auto ? ["# Auto: yes"] : []),
@@ -81,8 +121,9 @@
     // Tier is the cross-site seating band from tiers.js. On the FIFA sites
     // Category is the real CAT 1/2/3/4 and Tier sits alongside it; on the
     // marketplaces Category is a constant and Tier is the useful column.
-    // Type (primary / resale / blank) is LAST so a reader keyed on column position is undisturbed.
-    const header = "Block,Area,Row,Seat,Seat_Range,Category,Tier,Price_USD,Exclusive,Type";
+    // Type (primary / resale / blank) and View (limited / blank) come LAST so a reader keyed on column
+    // position is undisturbed.
+    const header = "Block,Area,Row,Seat,Seat_Range,Category,Tier,Price_USD,Exclusive,Type,View";
     const rows = seats
       .sort((a, b) =>
         a.price - b.price
@@ -97,7 +138,7 @@
         // venue mapping changes.
         const tier = o.tierFor(m.venue, s.block, s.row);
         const tierCell = tier.includes(",") ? `"${tier}"` : tier;
-        return `${s.block},${area},${s.row},${s.seat},${s.seatRange || ""},${s.category},${tierCell},${o.priceUSD(s.price).toFixed(2)},${s.exclusive},${listingType(s.site || game.site, s.category)}`;
+        return `${s.block},${area},${s.row},${s.seat},${s.seatRange || ""},${s.category},${tierCell},${o.priceUSD(s.price).toFixed(2)},${s.exclusive},${listingType(s.site || game.site, s.category)},${listingView(s)}`;
       });
 
     const csv = [...meta, "", header, ...rows].join("\n");
@@ -114,4 +155,6 @@
 
   root.buildScoutCsv = buildScoutCsv;
   root.scoutListingType = listingType;
+  root.scoutListingView = listingView;
+  root.scoutIsAccessibleSeat = isAccessibleSeat;
 })(typeof self !== "undefined" ? self : this);
