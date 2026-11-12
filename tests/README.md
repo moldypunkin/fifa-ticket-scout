@@ -39,6 +39,7 @@ passed while the extension misbehaved.
 | `evenue-schools-check` | every Evenue school end to end, each against its own captured payload — Paciolan builds differ per school, so this is what stops a fix for one denting another |
 | `tm-audit-check` | Ticketmaster price resolution and the cheapest-seat audit |
 | `tm-unplaced-facets-check` | resale listings that publish a section and a count but no seat places — 867 of them on one event, dropped in silence until this; and that a GA section's count is stored whole rather than clamped to 200 |
+| `onlocation-check` | On Location, the one source read from page state rather than the network: that Seatics' double-indexed sections are deduped to one row per listing, that the level comes from the prefixed alias, and that an all-in price which never beats the base is reported as unconfirmed |
 | `seat-counts-check` | one stored record standing for many tickets: that the count expands faithfully into distinct rows, that a nonsensical count reads as one ticket, and that the dashboard and the CSV both expand before counting anything |
 | `tm-facets-pagination-check` | following ISMDS page links, and keeping what was fetched when a page fails |
 | `section-filter-check` | the section filter box: matching rules, and that it runs before every renderer |

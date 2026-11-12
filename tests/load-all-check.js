@@ -191,6 +191,7 @@ out("--- each MAIN-world adapter, on its own site ---");
     ["vividseats-adapter.js", "https://www.vividseats.com/nfl/chiefs-tickets/production/5432109"],
     ["gametime-adapter.js", "https://gametime.co/nfl-football/chiefs-tickets/9-14-2026-denver/events/6512ab34cd56ef7890123456"],
     ["gotickets-adapter.js", "https://gotickets.com/tickets/1984079/trans-siberian-orchestra-tickets/t-mobile-center-kansas-city-mo-12-29-2026?orderBy=Price%3A+Low+to+High&quantity=2"],
+    ["onlocation-adapter.js", "https://onlocationexp.com/e/sports/ncaa-mens-college-world-series-ticket-(game-1)-and-tailgate-experience/charles-schwab-field-omaha/june-18-2027-1001555732"],
     ["ticketsforless-adapter.js", "https://www.ticketsforless.com/events/nfl-football-tickets/kansas-city-chiefs-vs-indianapolis-colts-2026-09-20-19-20-00-7730195"],
     ["rutheckerd-adapter.js", "https://secure.rutheckerdhall.com/33733/33816?_gl=1*xs0mo*_gcl_au*MTU2MDc5MDk0NC4xNzkzMDMxNTE1&queueittoken=e_saftynetqueue2021v3~ts_1793031699~ce_true~rt_safetynet~h_bba84c12421f93a272d531e23826e17c38ae230baf4280a8dbe2938a2d644fed"],
   ];

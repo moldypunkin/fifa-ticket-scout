@@ -38,6 +38,10 @@
   // so if the same shape turns up at another venue this becomes a platform
   // check instead of a hostname one.
   const isRuthEckerd = window.location.hostname.includes('rutheckerdhall.com');
+  // On Location. In bring-up: the inventory endpoint is unknown, the probe
+  // below is armed for it, and the listings are known to load on an
+  // interaction rather than on page load.
+  const isOnLocation = window.location.hostname.includes('onlocationexp.com');
 
   if (isTicketmaster) {
     console.log("[FIFA Ticket Scout] Running on Ticketmaster (will use adapter) build " + BUILD_STAMP);
@@ -63,6 +67,8 @@
     console.log("[FIFA Ticket Scout] Running on TicketsForLess (passive capture) build " + BUILD_STAMP);
   } else if (isRuthEckerd) {
     console.log("[FIFA Ticket Scout] Running on Ruth Eckerd Hall (passive capture) build " + BUILD_STAMP);
+  } else if (isOnLocation) {
+    console.log("[FIFA Ticket Scout] Running on On Location (endpoint discovery mode) build " + BUILD_STAMP);
   } else {
     console.log("[FIFA Ticket Scout] Unknown ticketing site - no action");
     return;
@@ -180,6 +186,19 @@
               ? ["/axsmarketplace/offers", "/axsmarketplace/mapinfo",
                  "/axsmarketplace/eventinfo", "/veritix/start-flow/",
                  "/veritix/pre-flow/", "/veritix/inventory/"]
+              : isOnLocation
+              // Bring-up. The app bundle names exactly four first-party api
+              // paths — /api/seaticMap, /api/event/details, /api/logger and
+              // /api/checkout — and /api/event/details is the one that has
+              // never been seen called. /api/seaticMap is geometry plus event
+              // identity and carries no tickets. The whole directory is
+              // matched rather than that one path: this is a Next.js app, the
+              // tickets may well arrive in an RSC flight payload instead of an
+              // api call, and On Location is flagged unconfirmed below so the
+              // candidate ranking keeps naming everything regardless of what
+              // this matches. Narrowing before a capture confirms the endpoint
+              // is how AXS stayed invisible for three rounds.
+              ? ["/api/"]
               : ["/seatmap/", "/performance/"];
 
   // Defense-in-depth: prevent duplicate scans at the page level.
@@ -416,7 +435,7 @@
   // responses on the passive-capture sites, so the cost disappears the moment
   // capture works.
   const isPassiveSite = isStubHub || isSeatGeek || isEvenue || isTickPick || isAxs
-    || isRuthEckerd;
+    || isRuthEckerd || isOnLocation;
 
   // Sites where the inventory endpoint is still unknown. Candidate recording
   // normally stops as soon as MATCH_PATTERNS hits something, which is right
@@ -429,7 +448,7 @@
   // parsed, but it only ever returns the batch the page asked for. The full
   // set of listing ids comes from somewhere that has not been identified yet,
   // so keep ranking every response until it is. Remove once that is settled.
-  const isUnconfirmedSite = isAxs || isStubHub;
+  const isUnconfirmedSite = isAxs || isStubHub || isOnLocation;
   const MAX_CANDIDATES = 60;
   const CANDIDATE_MIN_CHARS = 2000;
   const candidates = new Map();   // path -> largest byte length seen
@@ -512,6 +531,13 @@
   // start-flow and pre-flow specifically — the probe is what found it.
   // Set this to a short site tag to map the next source; package-check.js
   // blocks a release while it is non-null.
+  //
+  // On Location is mapped now, and the answer was that there is no endpoint:
+  // its listings never cross the network in any form: not fetch, XHR,
+  // WebSocket or JSONP, and not in the server-rendered html either. They exist
+  // only as page state, which onlocation-adapter.js reads directly. The JSONP
+  // channel below stays — it was built for this hunt and found /api/seaticMap,
+  // and the next site to use JSONP will need it.
   const DISCOVERY_SITE = null;
 
   // Whether the probe is on, said out loud at load.
@@ -548,7 +574,7 @@
   // Silence is ambiguous — it can mean "no request happened" or "the probe
   // threw and the caller's .catch swallowed it". Count every outcome and
   // report once, so a quiet run still says why.
-  const probeStats = { seen: 0, small: 0, skipped: 0, nonJson: 0, dup: 0, reported: 0, errors: 0, htmlReported: 0, smallNamed: 0, smallDumped: 0 };
+  const probeStats = { seen: 0, small: 0, skipped: 0, nonJson: 0, dup: 0, reported: 0, errors: 0, htmlReported: 0, smallNamed: 0, smallDumped: 0, jsonp: 0 };
   let probeSummaryTimer = null;
 
   function probeSummary() {
@@ -557,6 +583,10 @@
       `(skipped: ${probeStats.small} too small, ${probeStats.skipped} filtered, ` +
       `${probeStats.nonJson} not JSON, ${probeStats.dup} duplicate, ${probeStats.errors} errored)` +
       (probeStats.htmlReported ? ` [${probeStats.htmlReported} large non-JSON named above]` : ""));
+    if (probeStats.jsonp) {
+      console.log(`${t} jsonp: ${probeStats.jsonp} payload(s) came in by script ` +
+        `tag, which fetch and XHR hooks cannot see`);
+    }
     if (probeStats.seen === 0) {
       console.log(`${t} no responses reached the probe at all — the page may be serving from cache; try a hard reload`);
     }
@@ -674,7 +704,10 @@
     probeStats.seen++;
     if (!probeSummaryTimer) probeSummaryTimer = setTimeout(probeSummary, 12000);
     try {
-      probeResponseInner(url, text);
+      // Unwrapped first, so the size floor and the shape report below read the
+      // JSON rather than its wrapper.
+      const inner = probeUnwrapJsonp(text);
+      probeResponseInner(url, inner || text, !!inner);
     } catch (e) {
       probeStats.errors++;
       // Never silent: the fetch hook's .catch would otherwise hide this.
@@ -682,7 +715,38 @@
     }
   }
 
-  function probeResponseInner(url, text) {
+  // A JSONP body is JSON wrapped in a call or an assignment, so it fails the
+  // "starts with { or [" test and the probe files it as non-JSON — which means
+  // 120 characters of a payload instead of its shape. On Location's one known
+  // data call is exactly this:
+  //
+  //   GET /api/seaticMap?…&callback=callbackApiResponse
+  //   -> Seatics.mapData = function(){…}(); Seatics.mapData.svgData=[…]
+  //
+  // so whatever carries its ticket groups probably is too. Returns the JSON
+  // inside, or null when there is no wrapper to take off.
+  function probeUnwrapJsonp(text) {
+    const t = String(text).trim();
+    if (t.startsWith("{") || t.startsWith("[")) return null;
+
+    // callbackName({...}) or callbackName([...]), with an optional semicolon.
+    const call = t.match(/^[\w$.]+\s*\(\s*([[{][\s\S]*[\]}])\s*\)\s*;?$/);
+    if (call) return call[1];
+
+    // name.path = {...}; — the first complete-looking object or array after an
+    // assignment. Deliberately not clever: if this does not parse, the caller
+    // falls back to treating the body as non-JSON, which is what happens today.
+    const assign = t.match(/^[\w$.]+\s*=\s*([[{][\s\S]*[\]}])\s*;?\s*$/);
+    if (assign) return assign[1];
+
+    return null;
+  }
+
+  function probeResponseInner(url, text, wasJsonp) {
+    if (wasJsonp) {
+      console.log(`[${DISCOVERY_SITE}-PROBE] JSONP unwrapped from ` +
+        `${toAbsoluteUrl(url).slice(0, 160)}`);
+    }
     if (text.length < PROBE_MIN_CHARS) {
       probeStats.small++;
       // Availability can be compact — a bitmask or a list of ids — so name the
@@ -720,17 +784,51 @@
       probeStats.nonJson++;
       // Evenue (Paciolan) is server-rendered, so its inventory may well be
       // HTML. Name the biggest few so a non-JSON payload is not invisible.
-      if (text.length > 20000 && probeStats.htmlReported < 5) {
+      // Words that tell a listings payload apart from a skin, a map or a
+      // config. Counted before the size test, because on this site the size
+      // test is the thing that would hide it: the one known data call is 14kB
+      // of multi-statement JavaScript, under the 20kB floor that was set for
+      // Evenue's server-rendered pages.
+      const tokens = ["price", "section", "row", "seat", "quantity",
+        "ticket", "avail", "level", "zone", "tier", "package"];
+      const counts = tokens
+        .map((t) => {
+          const n = (text.match(new RegExp(t, "gi")) || []).length;
+          return n ? `${t}=${n}` : null;
+        })
+        .filter(Boolean);
+      const looksLikeInventory = counts.length >= 2;
+      if ((text.length > 20000 || looksLikeInventory) && probeStats.htmlReported < 8) {
         probeStats.htmlReported++;
         const key = String(url).split("?")[0];
         if (!probeBest.has("html:" + key)) {
           probeBest.set("html:" + key, text.length);
           console.log(`[${DISCOVERY_SITE}-PROBE] non-JSON ${(text.length / 1024).toFixed(1)}kB ${toAbsoluteUrl(url)}`);
-          console.log(`[${DISCOVERY_SITE}-PROBE]   starts: ${head.slice(0, 120).replace(/\s+/g, " ")}`);
           // Tables are how a CGI site lists tickets.
           const tables = (text.match(/<table/gi) || []).length;
           const rows = (text.match(/<tr[\s>]/gi) || []).length;
           console.log(`[${DISCOVERY_SITE}-PROBE]   html: ${tables} tables, ${rows} rows`);
+          // Which inventory words are in here at all. A body with 50 prices
+          // and 50 sections is the listings however it is wrapped, and a body
+          // with none is a skin or a map — that is the call this answers, and
+          // 120 characters of the opening could not.
+          console.log(`[${DISCOVERY_SITE}-PROBE]   tokens: ${counts.join(" ") || "(none)"}`);
+          // Enough of the opening to see the structure rather than guess at
+          // it. Markup collapses to nothing useful, so HTML keeps the short
+          // form and everything else gets the longer one.
+          const dump = tables ? 200 : 1400;
+          console.log(`[${DISCOVERY_SITE}-PROBE]   starts: ${text.slice(0, dump).replace(/\s+/g, " ")}`);
+          // Where a price-looking number first appears, with its surroundings:
+          // on a wrapped payload this is usually the listing record itself.
+          // " and ' rather than a literal quote: extract-fn.js cannot
+          // tell a regex from a string, so a quote character in here makes it
+          // miscount this function's braces and the probe suites lose it.
+          const money = text.match(/[\s\x22\x27:,{[]([0-9]{2,5}(?:\.[0-9]{2})?)\s*[,}\]\x22\x27]/);
+          if (money) {
+            const at = Math.max(0, money.index - 180);
+            console.log(`[${DISCOVERY_SITE}-PROBE]   first number in context: ` +
+              `${text.slice(at, money.index + 220).replace(/\s+/g, " ")}`);
+          }
         }
       }
       return;
@@ -1008,11 +1106,130 @@
         : isGoTickets ? window.__goticketsAdapter
         : isTicketsForLess ? window.__ticketsforlessAdapter
         : isRuthEckerd ? window.__rutheckerdAdapter
+        : isOnLocation ? window.__onlocationAdapter
         : isVividSeats ? window.__vividseatsAdapter
         : null;
       return adapter ? adapter.getEventInfo() : undefined;
     } catch (e) {
       return undefined;
+    }
+  }
+
+  // ─── JSONP (discovery only) ─────────────────────────────────
+  // The blind spot that cost On Location a whole round. The probe hooks fetch,
+  // XHR and WebSocket; JSONP uses none of them. The page sets a global, appends
+  // a script whose src names it, and the server answers by CALLING that global
+  // — so the payload never passes through anything the probe watches. The first
+  // On Location round reported 76 responses and not one of its own API calls.
+  //
+  // Two halves, both passive: name every injected script (the url alone says
+  // which endpoints exist), and wrap the callback global so its arguments can
+  // be reported when they arrive. Nothing is re-requested.
+  if (DISCOVERY_SITE) {
+    const jsonpWatched = {};
+    const jsonpSeenSrc = {};
+    let jsonpReported = 0;
+
+    // Report one argument the page was handed, through the same shape
+    // reporting every other response gets.
+    const reportJsonpArg = (name, i, value) => {
+      if (jsonpReported > 40) return;
+      jsonpReported++;
+      let text;
+      try {
+        // Seatics hands back its own map object, which carries functions and
+        // can self-reference; a throw here must not break the page's callback.
+        text = JSON.stringify(value);
+      } catch (e) {
+        text = null;
+      }
+      if (text == null) {
+        console.log(`[${DISCOVERY_SITE}-PROBE] jsonp ${name} arg${i}: ` +
+          `not serialisable (${typeof value})`);
+        return;
+      }
+      probeStats.jsonp++;
+      console.log(`[${DISCOVERY_SITE}-PROBE] jsonp ${name} arg${i}: ${text.length}B`);
+      // A pseudo-url so the dedupe key and every existing report work unchanged.
+      probeResponse(`jsonp://${name}/arg${i}`, text);
+    };
+
+    const watchJsonpGlobal = (name) => {
+      if (!name || jsonpWatched[name]) return;
+      jsonpWatched[name] = true;
+      let held = window[name];
+      const wrap = (fn) => {
+        if (typeof fn !== "function" || fn.__probeWrapped) return fn;
+        const wrapped = function () {
+          try {
+            for (let i = 0; i < arguments.length; i++) {
+              reportJsonpArg(name, i, arguments[i]);
+            }
+          } catch (e) {
+            console.log(`[${DISCOVERY_SITE}-PROBE] jsonp ${name} report failed: ` +
+              (e && e.message));
+          }
+          return fn.apply(this, arguments);
+        };
+        wrapped.__probeWrapped = true;
+        return wrapped;
+      };
+      held = wrap(held);
+      try {
+        // Defined as an accessor so the callback is wrapped whenever the page
+        // assigns it, which for a JSONP library is just before the script goes
+        // in. Catching the assignment is the only reliable moment: the global
+        // is often deleted again the instant it has fired.
+        Object.defineProperty(window, name, {
+          configurable: true,
+          get: function () { return held; },
+          set: function (fn) { held = wrap(fn); },
+        });
+        console.log(`[${DISCOVERY_SITE}-PROBE] watching jsonp callback ${name}`);
+      } catch (e) {
+        console.log(`[${DISCOVERY_SITE}-PROBE] could not watch ${name}: ` + (e && e.message));
+      }
+    };
+
+    // The callback name On Location passes to its own JSONP fetches, taken
+    // from the app bundle (jsonpCallbackFunction: "callbackApiResponse"). Set
+    // up before the page runs so the assignment cannot be missed.
+    watchJsonpGlobal("callbackApiResponse");
+
+    const noteScript = (el) => {
+      let src = "";
+      try { src = String(el.src || el.getAttribute("src") || ""); } catch (e) { return; }
+      if (!src || src.indexOf("http") !== 0) return;
+      const clean = src.split("?")[0];
+      if (PROBE_SKIP.test(clean)) return;
+      if (jsonpSeenSrc[clean]) return;
+      jsonpSeenSrc[clean] = true;
+      // Only the page's own origin is worth naming: a third-party tag's script
+      // urls are noise, and there are dozens of them.
+      const sameOrigin = src.indexOf(window.location.origin) === 0;
+      let cb = null;
+      try {
+        const qs = new URLSearchParams(src.split("?")[1] || "");
+        cb = qs.get("callback") || qs.get("jsonp") || qs.get("callbackName");
+      } catch (e) { /* a src that is not a parseable url */ }
+      if (cb) watchJsonpGlobal(cb);
+      if (sameOrigin || cb) {
+        console.log(`[${DISCOVERY_SITE}-PROBE] script ${cb ? "JSONP " : ""}` +
+          `${src.slice(0, 200)}`);
+      }
+    };
+
+    try {
+      document.querySelectorAll("script[src]").forEach(noteScript);
+      new MutationObserver((records) => {
+        for (const r of records) {
+          for (const n of r.addedNodes || []) {
+            if (n && n.tagName === "SCRIPT") noteScript(n);
+          }
+        }
+      }).observe(document.documentElement || document, { childList: true, subtree: true });
+    } catch (e) {
+      console.log(`[${DISCOVERY_SITE}-PROBE] script watch failed: ` + (e && e.message));
     }
   }
 

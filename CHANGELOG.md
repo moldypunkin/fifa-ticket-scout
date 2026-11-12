@@ -4,6 +4,63 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## November 12, 2026 — v3.9.0
+
+### On Location
+
+`onlocationexp.com` is the thirteenth source, and the first whose listings are not captured from the network — because there is nothing there to capture.
+
+Five rounds went looking. **fetch, XHR and WebSocket**: 76 responses on the event page, not one of them from the site's own API. **JSONP**: the probe could not see it at all, which is a fix in its own right (below) — it found `/api/seaticMap`, and that turned out to be venue geometry plus event identity with no tickets in it. **The server-rendered html**: searched for every plausible record key, zero hits, no price field, and an `ld+json` block with no offers. **The Seatics framework itself**: all 580KB of it, whose only urls are schema.org, the SVG namespace, jsdelivr, GrowthBook and a checkout link — it never fetches tickets, it reads `config.tickets`, handed to it by the page.
+
+The listings only ever exist as page state:
+
+```
+Seatics.TicketConnector.SectionsByName[<section>].tickets
+```
+
+So `onlocation-adapter.js` reads them there and posts them under a synthetic path, `/__scout/seatics-tickets`. That reuses the whole existing pipeline — the content-script relay, the event info, `mergeSeats`, the logging — rather than growing a second one for a single site. It is not a url the site serves and nothing ever requests it.
+
+Two triggers, because one was not enough to trust: Seatics' own `processTickets` is wrapped (the exact moment the state becomes readable), with a four-second poll behind it that catches later changes and a build that renames the method. Only a changed set is posted.
+
+**Every section is indexed twice.** `SectionsByName` holds each one under its bare number (`102`) and again under its prefixed name (`LOWER LEVEL 102`), both pointing at the SAME ticket array. A census counted 104 tickets on an event holding 52 — exactly double, and 52 matches the widget's own ticket-group count from an earlier capture. Listings are deduped by `tgID`. The duplication is worth keeping though: `tgCanonSec` is empty on every record, so the prefixed key is the only place the level appears, and the level is the Area column.
+
+**One stored record per listing, carrying its quantity as a count** — the shape the Ticketmaster GA work introduced in v3.7.0. It fits exactly: TicketNetwork publishes no seat numbers at all, so copies of a listing would hold nothing its count does not.
+
+### On Location: The Price Is Not Confirmed Yet
+
+`tgAllInPrice` is what gets stored, which avoids deriving a fee table the way AXS needed — and that is the point, because a fitted formula would misprice every seat while looking right.
+
+But on the event read, `tgAllInPrice` **equalled** `tgPrice` and both fee fields were `0` on all 52 listings. So the field exists and is populated, and whether it is genuinely all-in or merely mirrors the base price on this configuration is unverified. Rather than assume either way, the worker says so on every scan:
+
+```
+[background] On Location prices: 0 of 52 listing(s) have tgAllInPrice above tgPrice,
+  0 carry a service or delivery fee — all-in equals base here, so the stored price is
+  UNCONFIRMED against checkout
+```
+
+**Settling it:** take one listing to the last screen before payment. If it rings up above the listed price, the stored field changes; the line above stops appearing the moment any listing carries a real fee. `tests/onlocation-check.js` pins both directions.
+
+### The Discovery Probe Could Not See JSONP
+
+Not specific to On Location, and the reason a whole round was wasted. The probe hooked fetch, XHR and WebSocket. A JSONP response arrives through none of them: the page sets a global, appends a script whose src names it, and the server answers by CALLING that global. The payload never passes anything that was being watched.
+
+- **Every injected script is named**, same-origin ones and anything carrying a `callback=` parameter — so an endpoint is visible even when its body is not.
+- **The callback global is wrapped**, set up before the page runs, because a JSONP library often deletes the global the instant it has fired. Its arguments go through the same shape reporting as every other response.
+- **A JSONP body is unwrapped** before the probe judges it, so `callback({…})` is read as the JSON it contains rather than filed as "not JSON" and dumped at 120 characters.
+- **The non-JSON floor was 20kB**, set for Evenue's server-rendered pages. On Location's one data call is 14kB, so it was invisible; anything past the ordinary size floor that actually contains inventory words is now reported.
+- The summary says `jsonp: N payload(s) came in by script tag, which fetch and XHR hooks cannot see`, so a quiet run cannot be misread the same way again.
+
+### The Actions Row Ran Off The Edge
+
+Five buttons, `display: flex`, no wrapping. `flex: 1` means a basis of zero, so they try to stay on one line however little room there is, and a flex item will not shrink below its own text — so across the popup's 420px the row overflowed and carried **Clear Data** past the right edge, where it could not be clicked. The row wraps now and its buttons size from their labels. `brand-check` fails if that is undone: the row has grown twice recently and the next button added would otherwise have pushed another one out of reach in silence.
+
+### Also
+
+- `brand-check`'s site-key census read `return "resale"` from anywhere in background.js, and a listing CATEGORY of that name is not a site key — adding a source broke a branding test for a reason it could not explain. Scoped to `siteFromUrl`.
+- 53 suites.
+
+---
+
 ## November 10, 2026 — v3.8.0
 
 ### Accessible Seats Are Left Out of the CSV

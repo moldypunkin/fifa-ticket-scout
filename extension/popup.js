@@ -179,6 +179,7 @@ function siteFromUrl(url) {
     if (h.includes("gotickets")) return "gotickets";
     if (h.includes("ticketsforless")) return "ticketsforless";
     if (h.includes("rutheckerdhall")) return "rutheckerd";
+    if (h.includes("onlocationexp")) return "onlocation";
     if (h.includes("axs")) return "axs";
     if (h.includes("-shop-")) return "lms";
     if (h.includes("-resale-")) return "resale";
@@ -307,6 +308,21 @@ function loadData() {
     const gotEventId = gotEventMatch ? gotEventMatch[1] : null;
     const isGoTicketsEvent = !!gotEventId;
 
+    // On Location: the trailing number of the last path segment, e.g.
+    //   /e/sports/<slug>/charles-schwab-field-omaha/june-18-2027-1001555732
+    // Anchored at the end because the segment carries a date full of numbers.
+    // Mirrors getOnLocationEventId() in onlocation-adapter.js; the two must
+    // stay in step or the adapter captures a page the popup cannot show.
+    //
+    // Note the site has a SECOND id — /api/seaticMap is called with
+    // TicketNetwork's eventId — and this is deliberately not that one: it is
+    // the only id readable from the address bar.
+    const isOnLocationSite = /onlocationexp\.com/.test(url);
+    const olEventMatch = isOnLocationSite && (url.match(/-(\d{6,})(?:[/?#]|$)/)
+      || url.match(/[?&]eventId=(\d{4,})/i));
+    const olEventId = olEventMatch ? olEventMatch[1] : null;
+    const isOnLocationEvent = !!olEventId;
+
     const isVividSeatsSite = /vividseats\.com/.test(url);
     const vsEventMatch = isVividSeatsSite && (url.match(/\/production[s]?\/(\d+)/i)
       || url.match(/[?&]productionId=(\d+)/i)
@@ -332,6 +348,7 @@ function loadData() {
         : isGoTicketsEvent ? "gotickets"
         : isTicketsForLessEvent ? "ticketsforless"
         : isRuthEckerdEvent ? "rutheckerd"
+        : isOnLocationEvent ? "onlocation"
         : null,
       // No site is in bring-up right now. A site belongs here rather than in
       // `passive` while it is recognised but has no parser, so the empty state
@@ -395,6 +412,9 @@ function loadData() {
       } else if (gotEventId) {
         const gotKey = `gotickets:${gotEventId}`;
         if (games[gotKey]) activeKey = gotKey;
+      } else if (olEventId) {
+        const olKey = `onlocation:${olEventId}`;
+        if (games[olKey]) activeKey = olKey;
       } else if (tflEventId) {
         const tflKey = `ticketsforless:${tflEventId}`;
         if (games[tflKey]) activeKey = tflKey;
@@ -472,8 +492,14 @@ function showEmpty(detected) {
     // with the page's own request, so there is no button to press, and the only
     // thing that differs between them is the name in the hint.
     title.textContent = "Waiting for listings…";
-    hint.textContent = `Reload this ${PASSIVE_SITE_LABELS[passive] || passive} event page ` +
-      `and the ${passive === "evenue" ? "seats" : "tickets"} will be captured automatically.`;
+    // On Location is the one source whose listings are not on the wire at
+    // all: they appear in page state only once the ticket view is opened, so
+    // telling someone to reload and wait would be wrong.
+    hint.textContent = passive === "onlocation"
+      ? "Open this event's ticket view and let the prices render — the listings " +
+        "are read from the page as they appear."
+      : `Reload this ${PASSIVE_SITE_LABELS[passive] || passive} event page ` +
+        `and the ${passive === "evenue" ? "seats" : "tickets"} will be captured automatically.`;
     action.style.display = "none";
     const lmsBtn = document.getElementById("emptyActionLms");
     if (lmsBtn) lmsBtn.style.display = "none";
@@ -1012,7 +1038,7 @@ let currentSite = "resale";
 // again changes this one line.
 const CONFIG_REPO = "https://raw.githubusercontent.com/moldypunkin/fifa-ticket-scout/main";
 
-const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", tickpick: "TickPick", axs: "AXS", vividseats: "Vivid Seats", gametime: "Gametime", gotickets: "GoTickets", ticketsforless: "TicketsForLess", rutheckerd: "Ruth Eckerd Hall", resale: "Resale" };
+const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", tickpick: "TickPick", axs: "AXS", vividseats: "Vivid Seats", gametime: "Gametime", gotickets: "GoTickets", ticketsforless: "TicketsForLess", rutheckerd: "Ruth Eckerd Hall", onlocation: "On Location", resale: "Resale" };
 
 // The header follows the active site. `lms` and `resale` are both FIFA
 // properties, so they keep the original name.
@@ -1034,6 +1060,7 @@ const SITE_FILE_TAGS = {
   gotickets: "gotickets",
   ticketsforless: "ticketsforless",
   rutheckerd: "ruth-eckerd-hall",
+  onlocation: "onlocation",
 };
 
 function siteFileTag(site) {
@@ -1063,6 +1090,7 @@ const PASSIVE_SITE_LABELS = {
   gotickets: "GoTickets",
   ticketsforless: "TicketsForLess",
   rutheckerd: "Ruth Eckerd Hall",
+  onlocation: "On Location",
 };
 
 const SITE_BRANDS = {
@@ -2056,7 +2084,7 @@ function compareVersions(a, b) {
 // tickpick stores `p`, the per-ticket price the listing quotes. TickPick
 // advertises all-in pricing so 1.0 is expected to be right, but that has not
 // been checked against a checkout page.
-const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0, gotickets: 1.0, ticketsforless: 1.0, rutheckerd: 1.0 };
+const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0, gotickets: 1.0, ticketsforless: 1.0, rutheckerd: 1.0, onlocation: 1.0 };
 
 // Flat per-ticket fee, added after the multiplier. Percentage fees alone could
 // not describe Evenue: its price-level table quotes a base price and the site

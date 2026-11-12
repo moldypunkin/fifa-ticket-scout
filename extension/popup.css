@@ -2222,8 +2222,21 @@ body {
 .actions {
   padding: 12px 16px;
   display: flex;
+  /* The row holds five buttons and the popup is 420px. A flex item will not
+     shrink below its own text, so without wrapping the row simply ran off the
+     right edge and took "Clear Data" with it — clipped, and unclickable. It
+     wraps now, which also means the next button added cannot silently push
+     another one out of reach. */
+  flex-wrap: wrap;
   gap: 8px;
   border-bottom: 1px solid var(--border);
+}
+
+/* `flex: 1` (basis 0) would keep every button on one line however little room
+   there is, which is the behaviour being fixed. Sizing from the label instead
+   lets the line break where it has to, and grow still fills the width out. */
+.actions .btn {
+  flex: 1 1 auto;
 }
 
 .btn {

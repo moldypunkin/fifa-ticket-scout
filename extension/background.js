@@ -151,6 +151,7 @@ function siteFromUrl(url) {
     if (h.includes("gotickets")) return "gotickets";
     if (h.includes("ticketsforless")) return "ticketsforless";
     if (h.includes("rutheckerdhall")) return "rutheckerd";
+    if (h.includes("onlocationexp")) return "onlocation";
     if (h.includes("axs")) return "axs";
     if (h.includes("-resale-")) return "resale";
     if (h.includes("-shop-"))   return "lms";
@@ -575,7 +576,7 @@ function mergeSeats(prev, seats, tabId, gameKey) {
 // Copies of popup.js's fee tables, file tags, price maths and TM event-id
 // parser: the service worker cannot load popup.js. tests/auto-pull-check.js
 // fails if any copy differs from the popup's, so edit both together.
-const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0, gotickets: 1.0, ticketsforless: 1.0, rutheckerd: 1.0 };
+const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0, gotickets: 1.0, ticketsforless: 1.0, rutheckerd: 1.0, onlocation: 1.0 };
 const FEE_FLAT_BY_SITE = { resale: 0, lms: 0, ticketmaster: 0, seatgeek: 0, stubhub: 0, evenue: 5.00, tickpick: 0, axs: 0 };
 const SITE_FILE_TAGS = {
   resale: "fifa-resale",
@@ -591,6 +592,7 @@ const SITE_FILE_TAGS = {
   gotickets: "gotickets",
   ticketsforless: "ticketsforless",
   rutheckerd: "ruth-eckerd-hall",
+  onlocation: "onlocation",
 };
 
 function siteFileTag(site) {
@@ -1101,6 +1103,21 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
     }
   }
 
+  // On Location. NOT a network capture — see saveOnLocationSeats below. The
+  // adapter reads the listings out of Seatics' page state and posts them under
+  // this synthetic path, so they arrive through the same pipeline as every
+  // real response.
+  if (site === "onlocation" && url.includes("/__scout/seatics-tickets") &&
+      body && Array.isArray(body.tickets)) {
+    const olEventId = String(body.eventId || "");
+    if (olEventId) {
+      await enforceGameLimit(`${site}:${olEventId}`);
+      await saveOnLocationSeats(olEventId, body, tabId, site, eventInfo);
+    } else {
+      bgLog("[background] On Location: listings arrived with no event id — not parsing");
+    }
+  }
+
   // TicketsForLess. One payload, captured passively:
   //
   //   GET www.ticketsforless.com/api/tickets/tfl?EventID=<id>
@@ -1165,6 +1182,28 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
     } else if (!m) {
       bgLog("[background] GoTickets: listings array at an unexpected url, not parsed: " +
         url.split("?")[0]);
+    }
+  }
+
+  // On Location bring-up. Nothing is parsed yet, so every captured payload is
+  // described here as well as by the page probe: the worker log is the one the
+  // popup can download, which makes it the easier thing to send back.
+  if (site === "onlocation") {
+    const path = url.split("?")[0];
+    const shape = describeShape(body, 5).slice(0, 2000);
+    const seen = path + " " + shape;
+    if (!onlocationSeenShapes.has(seen)) {
+      onlocationSeenShapes.add(seen);
+      let size = "?";
+      try { size = Math.round(JSON.stringify(body).length / 1024) + "KB"; } catch (e) {}
+      bgLog(`[background] On Location: ${path} (${size}) -> ${shape}`);
+      // Where the arrays of records sit, which is what a listings payload is.
+      // The shape above stops at a few keys per level and would hide them.
+      try {
+        axsLogArrays(path, body, "On Location");
+      } catch (e) {
+        bgLog("[background] On Location: could not walk " + path + ": " + (e && e.message));
+      }
     }
   }
 
@@ -1946,6 +1985,178 @@ async function saveSeatGeekSeats(eventId, body, tabId, site, eventInfo) {
   await chrome.storage.local.set({ games });
 }
 
+// ─── On Location (TicketNetwork / Seatics) ───────────────────────
+// The one source here that is not a network capture, because there is nothing
+// to capture. Five discovery rounds ruled out fetch, XHR, WebSocket, JSONP and
+// the server-rendered html, and the Seatics framework does not fetch tickets
+// either — it reads `config.tickets`, handed to it by the page. The listings
+// only ever exist as page state, at
+//
+//   Seatics.TicketConnector.SectionsByName[<section>].tickets
+//
+// so onlocation-adapter.js reads them there and posts them under a synthetic
+// path. Everything below is the ordinary parser shape.
+//
+// One record per listing, read off a live event (1001555732, NCAA Men's
+// College World Series Game 1 + Tailgate, Charles Schwab Field Omaha):
+//
+//   tgID           "73469762"   listing id, unique; the dedupe key
+//   tgUserSec      "102"        section
+//   tgUserRow      "12"         row
+//   tgUserSeats    ""           ALWAYS empty — no seat numbers are published
+//   tgQty          2            how many the listing holds
+//   tgPrice        310          per ticket, before fees
+//   tgAllInPrice   310          per ticket, all in, as the page computes it
+//   tgServiceFee   0            }
+//   tgDeliveryFee  0            } the breakdown behind tgAllInPrice
+//   tgFaceValue    undefined    absent on this event (sawFaceValue false)
+//   tgCType        "R"          listing class
+//   splits         [2]          purchasable lot sizes, NOT a count
+//   level          "LOWER LEVEL" from the section's prefixed alias
+//
+// PRICING, AND WHAT IS NOT YET CONFIRMED: tgAllInPrice is stored, which avoids
+// deriving a fee table the way AXS needed. But on the event read, tgAllInPrice
+// equalled tgPrice and both fee fields were 0 on all 52 listings — so the
+// field exists and is populated, and whether it is genuinely all-in or just
+// mirrors the base price on this configuration is UNVERIFIED. One checkout
+// total settles it. The fee figures are logged per scan so an event that does
+// carry them is visible immediately rather than silently mispriced.
+function onLocationPrice(t) {
+  const candidates = [t && t.tgAllInPrice, t && t.tgPrice, t && t.tgDisplayPrice];
+  for (const c of candidates) {
+    const n = typeof c === "string" ? parseFloat(c) : c;
+    if (typeof n === "number" && isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+// "R" is the only class seen. Rather than assert what it means, the raw value
+// is carried through as an attribute and the distinct values are logged; a new
+// one therefore shows up as itself instead of being filed as resale.
+function onLocationCategory(t) {
+  const c = String((t && t.tgCType) || "").toUpperCase();
+  if (c === "R") return "resale";
+  return c ? `class ${c}` : "standard";
+}
+
+function onLocationAttributes(t) {
+  const out = [];
+  if (t.tgIsZoneTicket === true) {
+    // Not a specific seat in that section, which matters next to a row number.
+    out.push("Zone seating");
+  }
+  const notes = String(t.tgNotes || "").trim();
+  if (notes) out.push(notes.slice(0, 80));
+  // What the seller paid, where the payload says — absent on the event read.
+  const face = Number(t.tgFaceValue);
+  if (isFinite(face) && face > 0) out.push(`face $${face.toFixed(2)}`);
+  const splits = Array.isArray(t.splits) ? t.splits : [];
+  if (splits.length) out.push(`sells in ${splits.join(",")}`);
+  return out;
+}
+
+async function saveOnLocationSeats(eventId, body, tabId, site, eventInfo) {
+  if (!body || !Array.isArray(body.tickets)) return;
+
+  const gameKey = `${site}:${eventId}`;
+  const data = await getStorage();
+  const games = data.games || {};
+  if (!games[gameKey]) games[gameKey] = emptyGame();
+
+  if (eventInfo && eventInfo.name) {
+    const prev = games[gameKey].match || {};
+    games[gameKey].match = {
+      name: eventInfo.name,
+      date: eventInfo.date || prev.date || null,
+      venue: eventInfo.venue || prev.venue || null,
+      currency: "USD",
+      performanceId: eventId,
+    };
+  }
+
+  const venueName = games[gameKey].match && games[gameKey].match.venue;
+  const seats = {};
+  let missingPrice = 0;
+  let withFees = 0;
+  let allInAboveBase = 0;
+  const classes = {};
+
+  try {
+    for (const t of body.tickets) {
+      if (!t) continue;
+      const dollars = onLocationPrice(t);
+      if (dollars == null) { missingPrice++; continue; }
+      // Stored in thousandths to match centsToUSD() in the popup.
+      const price = Math.round(dollars * 1000);
+
+      const block = String(t.tgUserSec || "");
+      const row = String(t.tgUserRow || "");
+      const category = onLocationCategory(t);
+      classes[String(t.tgCType || "?")] = (classes[String(t.tgCType || "?")] || 0) + 1;
+
+      const fee = Number(t.tgServiceFee);
+      const delivery = Number(t.tgDeliveryFee);
+      if ((isFinite(fee) && fee > 0) || (isFinite(delivery) && delivery > 0)) withFees++;
+      const base = Number(t.tgPrice);
+      const allIn = Number(t.tgAllInPrice);
+      if (isFinite(base) && isFinite(allIn) && allIn > base) allInAboveBase++;
+
+      const qty = Number(t.tgQty);
+      const count = isFinite(qty) && qty >= 1 ? Math.floor(qty) : 1;
+      const attributes = onLocationAttributes(t);
+      const accessible = /\b(ada|accessible|wheelchair)\b/i
+        .test(block + " " + String(t.tgNotes || ""));
+
+      // ONE record carrying its count, not `count` copies of it — the same
+      // shape the Ticketmaster GA work introduced in v3.7.0. These tickets are
+      // indistinguishable: one section, one row, one price, and no seat
+      // numbers at all, so the copies would hold nothing the count does not.
+      // expandSeatCounts() in seat-counts.js puts the rows back for display.
+      seats[`ol:${t.tgID}`] = {
+        block,
+        row,
+        seat: "",
+        area: String(t.level || ""),
+        category,
+        tier: VenueTiers.tierFor(venueName, block, row),
+        price,
+        exclusive: true,
+        site: "onlocation",
+        accessible,
+        attributes,
+        count,
+      };
+    }
+  } catch (error) {
+    bgLog("[background] Error parsing On Location listings:", error.message);
+  }
+
+  const listings = Object.keys(seats).length;
+  let tickets = 0;
+  for (const k of Object.keys(seats)) tickets += seats[k].count || 1;
+
+  bgLog(`[background] On Location: ${listings} listing(s) / ${tickets} ticket(s) ` +
+    `from ${body.tickets.length} record(s)` +
+    (missingPrice ? `, ${missingPrice} had no price` : "") +
+    `, classes ${Object.keys(classes).map((k) => k + "\u00d7" + classes[k]).join(" ")}`);
+  // The open question, reported every scan rather than assumed once: if the
+  // all-in figure never rises above the base and no listing carries a fee,
+  // then either this site genuinely adds none or these fields are not the
+  // whole price. A checkout total is the only thing that tells them apart.
+  bgLog(`[background] On Location prices: ${allInAboveBase} of ${listings} listing(s) ` +
+    `have tgAllInPrice above tgPrice, ${withFees} carry a service or delivery fee` +
+    (allInAboveBase === 0 && withFees === 0
+      ? " — all-in equals base here, so the stored price is UNCONFIRMED against checkout"
+      : ""));
+
+  games[gameKey].seats = mergeSeats(games[gameKey].seats, seats, tabId, gameKey);
+  games[gameKey].site = site;
+  games[gameKey].lastScanned = Date.now();
+
+  if (tabId) tabGameMap[tabId] = gameKey;
+  await chrome.storage.local.set({ games });
+}
+
 // ─── StubHub listings ─────────────────────────────────────────────────────
 // One entry per listing under `items`. Confirmed against a live capture of
 // event 160425133:
@@ -2536,6 +2747,9 @@ function evenueLogFeeTable(node, depth) {
 // AXS payload shapes already reported, so bring-up logs each once rather than
 // once per response.
 const axsSeenShapes = new Set();
+
+// Same, for On Location, which is in bring-up and parses nothing yet.
+const onlocationSeenShapes = new Set();
 
 // Same, for the StubHub array census.
 const stubhubSeenShapes = new Set();
@@ -4102,7 +4316,7 @@ function axsLogOnsale(path, body) {
   }
 }
 
-function axsLogArrays(path, body) {
+function axsLogArrays(path, body, label) {
   const found = [];
   const INTERESTING = /price|amount|total|fee|sect|row|seat|name|desc|avail|qty|quant|count|level|zone|area|date|venue|type|code|id$/i;
   const walk = (v, where, depth) => {
@@ -4117,7 +4331,7 @@ function axsLogArrays(path, body) {
   };
   walk(body, "", 0);
   const short = path.split("/").slice(-3).join("/").slice(0, 60);
-  bgLog(`[background] AXS arrays in …${short}: ${found.length} found, largest first`);
+  bgLog(`[background] ${label || "AXS"} arrays in …${short}: ${found.length} found, largest first`);
   found.sort((a, b) => b.len - a.len).slice(0, 25).forEach((f) => {
     const keys = Object.keys(f.first);
     const sample = keys.filter((k) => INTERESTING.test(k)).slice(0, 10).map((k) => {

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FIFA Ticket Scout",
-  "version": "3.8.0",
+  "version": "3.9.0",
   "description": "Real-time price tracking for FIFA World Cup 2026 resale tickets. See every seat, every price, at a glance.",
   "permissions": [
     "storage",
@@ -25,6 +25,7 @@
     "*://*.gotickets.com/*",
     "*://*.ticketsforless.com/*",
     "*://*.rutheckerdhall.com/*",
+    "*://*.onlocationexp.com/*",
     "https://api.gumroad.com/*",
     "https://yaydpahqlqwesqdddgfi.supabase.co/*",
     "https://raw.githubusercontent.com/*"
@@ -150,6 +151,17 @@
     },
     {
       "matches": ["*://*.gotickets.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["*://*.onlocationexp.com/*"],
+      "js": ["event-info.js", "onlocation-adapter.js", "injected.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://*.onlocationexp.com/*"],
       "js": ["content.js"],
       "run_at": "document_start"
     },
