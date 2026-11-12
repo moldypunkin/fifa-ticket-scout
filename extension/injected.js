@@ -9,7 +9,7 @@
   // Three debugging rounds in this project were spent on results produced by a
   // build that had not been reloaded, which is indistinguishable from a change
   // that did not work. Compare this against what package.py prints.
-  const BUILD_STAMP = "63d0979a";
+  const BUILD_STAMP = "7775a64e";
   
   // Detect which ticketing site we're on
   const isTicketmaster = window.location.hostname.includes('ticketmaster.com');
