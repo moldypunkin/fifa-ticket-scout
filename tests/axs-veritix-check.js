@@ -428,7 +428,15 @@ const INFO = { name: "The Midland Theatre - Select", date: null, venue: "The Mid
   const ga = gaSeats.filter((x) => x.block === "General Admission");
   const reserved = gaSeats.filter((x) => x.block === "402");
 
-  check("the GA admissions are stored", ga.length === 2, String(ga.length));
+  // One record for the section, not one per admission: the items are
+  // indistinguishable, and keying them on section + row + number collided so
+  // that 1090 of them were stored as a single seat.
+  check("the section is one counted record", ga.length === 1, String(ga.length));
+  check("and the count is the number of admissions", ga[0] && ga[0].count === 2,
+    ga[0] && String(ga[0].count));
+  // What the popup actually draws: the count expanded back into rows.
+  check("it expands to that many rows",
+    ctx.expandSeatCounts(ga).length === 2, String(ctx.expandSeatCounts(ga).length));
   // Blank on both counts, which is what makes the popup collapse them into
   // "N available · seats not numbered" rather than listing them one by one.
   check("no seat number is kept", ga.every((x) => x.seat === ""),
@@ -439,11 +447,19 @@ const INFO = { name: "The Midland Theatre - Select", date: null, venue: "The Mid
     ga.every((x) => x.attributes.indexOf("general admission") !== -1),
     ga.map((x) => x.attributes.join("|")).join(" / "));
   check("they still carry a price", ga.every((x) => x.price > 0));
-  // Each admission is its own item with its own number, so they must land
-  // under distinct keys rather than collapsing into one and losing the count.
-  // The number is still part of the key even though it is not shown.
-  check("one record per admission", Object.keys(gaGame.seats).length === 3,
+  // The GA section and the reserved seat, and nothing else.
+  check("two records in all", Object.keys(gaGame.seats).length === 2,
     Object.keys(gaGame.seats).length + " key(s)");
+  // The log has to report tickets, not stored records, or a counted section
+  // reads as one seat there too — which is how this was reported.
+  // Anchored on the marker, not on a seat total: the resale fixture above
+  // also logs "3 seats from" and a plain find picks that one up.
+  const gaLine = logs.find((l) => /general admission is counted, not listed/.test(l)) || "";
+  check("the log says the records were counted", !!gaLine,
+    logs.filter((l) => /AXS Veritix: \d+ seats from/.test(l)).slice(-1)[0]);
+  // 2 admissions + 1 reserved seat = 3 tickets held in 2 records.
+  check("and counts tickets, not records",
+    /3 seats from .*\(2 stored record\(s\)/.test(gaLine), gaLine);
 
   check("a reserved seat in the same payload keeps its row",
     reserved.length === 1 && reserved[0].row === "C" && reserved[0].seat === "14",

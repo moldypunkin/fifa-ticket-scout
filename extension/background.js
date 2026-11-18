@@ -4785,14 +4785,7 @@ async function saveAxsVeritixSeats(token, body, tabId, site, eventInfo) {
         if (notes) attrs.push(notes.slice(0, 80));
       }
 
-      // sectionID+rowID+number is unique within an offer, and the offer id
-      // keeps the ADA and premium copies of a section apart.
-      // item.id is unique across the venue on the resale flow, where
-      // sectionID and rowID are null; the primary flow has all three.
-      const seatKey = item.sectionID != null && item.rowID != null
-        ? `veritix:${offerID}:${item.sectionID}:${item.rowID}:${item.number}`
-        : `veritix:${offerID}:${item.id}`;
-      seats[seatKey] = {
+      const record = {
         block,
         row,
         seat: isGA ? "" : String(item.number == null ? "" : item.number),
@@ -4806,12 +4799,53 @@ async function saveAxsVeritixSeats(token, body, tabId, site, eventInfo) {
           (Array.isArray(item.disabilityTypes) && item.disabilityTypes.length > 0),
         attributes: attrs,
       };
+
+      // A general admission section lists one item per admission, and those
+      // items are indistinguishable: one section, one price, no row and no
+      // seat number that means anything. The key below is built from section +
+      // row + number, so on a GA event every item produced the SAME key and
+      // overwrote the one before it — 1090 admissions were stored as 2 seats,
+      // one per section, and the dashboard reported a single seat where there
+      // were hundreds.
+      //
+      // So they are counted rather than keyed: ONE record carrying `count`,
+      // which is the shape seat-counts.js was added for in v3.7.0. Nothing is
+      // lost — a copy of a GA admission holds nothing its count does not — and
+      // expandSeatCounts() turns the count back into rows for display.
+      //
+      // Status and price level are part of the bucket because they are the two
+      // things that can differ between admissions in one section, and either
+      // would make them genuinely different rows.
+      if (isGA) {
+        const gaKey = `veritix:ga:${offerID}:${item.sectionID}:` +
+          `${item.priceLevelID}:${status}`;
+        if (seats[gaKey]) {
+          seats[gaKey].count++;
+        } else {
+          record.count = 1;
+          seats[gaKey] = record;
+        }
+        continue;
+      }
+
+      // sectionID+rowID+number is unique within an offer, and the offer id
+      // keeps the ADA and premium copies of a section apart.
+      // item.id is unique across the venue on the resale flow, where
+      // sectionID and rowID are null; the primary flow has all three.
+      const seatKey = item.sectionID != null && item.rowID != null
+        ? `veritix:${offerID}:${item.sectionID}:${item.rowID}:${item.number}`
+        : `veritix:${offerID}:${item.id}`;
+      seats[seatKey] = record;
     }
   }
 
-  const total = Object.keys(seats).length;
+  const keys = Object.keys(seats);
+  let total = 0;
+  for (const k of keys) total += seats[k].count || 1;
   bgLog(`[background] AXS Veritix: ${total} seats from ${offerSeen.join(", ")}` +
-    (missingPrice ? `, ${missingPrice} with no price for their level` : ""));
+    (missingPrice ? `, ${missingPrice} with no price for their level` : "") +
+    (keys.length === total ? ""
+      : ` (${keys.length} stored record(s) — general admission is counted, not listed)`));
   if (statusSeen.size) {
     bgLog(`[background] AXS Veritix: statusCodeLabel values: ` +
       [...statusSeen.entries()].map((e) => `"${e[0]}"x${e[1]}`).join(", "));

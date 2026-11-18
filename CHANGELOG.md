@@ -4,6 +4,38 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## November 18, 2026 — v3.9.2
+
+### AXS: 1,090 General Admissions Stored As One Seat
+
+Reported from the build shipped an hour earlier: AXS general admission was populating at last, but every section read as a single seat. The service worker said the same thing out loud and nobody had asked it the right question:
+
+```
+[background] AXS Veritix: 2 seats from SEAT×1090
+```
+
+A thousand and ninety items in, two seats out — one per section.
+
+The seat key is built from section + row + number:
+
+```js
+`veritix:${offerID}:${item.sectionID}:${item.rowID}:${item.number}`
+```
+
+Every admission in a GA section shares all three, so each one overwrote the one before it and only the last survived. v3.9.1 blanked the row and seat so GA would stop pretending to be reserved seating, which was right, but it never touched the key — the records had already collapsed before the display saw them.
+
+**GA admissions are counted now, not keyed.** One record per section carrying `count`, which is the shape `seat-counts.js` was added for in v3.7.0: a copy of a general admission holds nothing its count does not, and `expandSeatCounts()` turns the count back into rows for the dashboard, which reads "1090 available · seats not numbered". The bucket is per section AND price level AND status, because those are the two things that can really differ between admissions in one section, and either makes them a different row.
+
+The log was lying in the same way and now counts tickets rather than stored records:
+
+```
+AXS Veritix: 3 seats from standard×3 (2 stored record(s) — general admission is counted, not listed)
+```
+
+**Not acted on:** the payloads carry three numbers that could each be read as availability — 1,090 items in `offer/search`, `amount: 8` on the price level, and `amount: 1067` in the sections payload. The item count is what is stored, because it is the inventory the page itself lists and the only one that ties to specific records. The other two mean something else (8 looks like a per-order maximum) and guessing between them is how a plausible wrong number gets shipped.
+
+---
+
 ## November 18, 2026 — v3.9.1
 
 ### AXS: An Event Whose Token Began With A Slash
