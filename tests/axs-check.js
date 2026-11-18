@@ -80,6 +80,8 @@ check("agrees on the e= flow",
   const block = popup.match(/const isAxsSite[\s\S]*?const axsTokenId = [^\n]+/);
   check("popup token block found", !!block);
   const BOTH = "https://tix.axs.com/nZA9NwAAAACm6CxDAwAAAAAx%2fv%2f%2f%2fwD%2f?c=axs&e=92678159754734056&rt=AfterEvent";
+  // The popup block calls axsVeritixId, so it has to exist in this scope.
+  global.axsVeritixId = eval("(" + extractFn(popup, "axsVeritixId") + ")");
   const tokenId = block && ((url) => eval(block[0] + ";\naxsTokenId"))(BOTH);
   const OFFERS = "https://unifiedapicommerce-us.axs.com/axsmarketplace/offers?onsaleID=nZA9NwAAAACm6CxDAwAAAAAx%2Fv%2F%2F%2FwD&flow=best_available";
   const parserId = eval("(" + extractFn(bg, "axsOnsaleToken") + ")")(OFFERS);

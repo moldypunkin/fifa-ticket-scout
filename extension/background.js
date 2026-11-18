@@ -4434,11 +4434,34 @@ let axsVeritixPriceShapeLogged = false;
 
 // The onsale token out of a Veritix path. The same leading run the page url
 // carries and the popup keys on, so seats land where the dashboard looks.
+// The id for one Veritix event, taken from the opaque token in the url.
+//
+// The token is base64 whose slashes arrive percent-encoded, so a url carries
+// e.g. nZA9NwAAAACjRE1GAwAAAAB6%2Fv%2F%2F… The leading run of safe characters
+// has always been the id, because the popup can read that same run off the
+// tix.axs.com page url without decoding anything.
+//
+// That breaks when the first escape lands early. A live event's token began
+// "yw%2FUNg…" — a two-character run, short of the 12 needed to be sure this is
+// a token and not a path word — and every payload it carried was dropped with
+// "no token in …": the price table, the sections, and all 1090 general
+// admissions. So when the leading run is too short, the escapes are stripped
+// out and what is left is used instead.
+//
+// Long tokens keep exactly the id they had, so an event captured before this
+// still resolves to the same storage key. popup.js carries the same function
+// and axs-veritix-check.js fails if the two drift apart.
+function axsVeritixId(segment) {
+  const raw = String(segment || "");
+  const lead = (raw.split("%")[0] || "").replace(/[^A-Za-z0-9_-]/g, "");
+  if (lead.length >= 12) return lead;
+  const stripped = raw.replace(/%[0-9A-Fa-f]{2}/g, "").replace(/[^A-Za-z0-9_-]/g, "");
+  return stripped.length >= 12 ? stripped : "";
+}
+
 function axsVeritixToken(url) {
   const m = String(url).match(/\/veritix\/[^/]+\/[^/]+\/([^/?#]+)/i);
-  if (!m) return "";
-  const token = (m[1].split("%")[0] || "").replace(/[^A-Za-z0-9_-]/g, "");
-  return token.length >= 12 ? token : "";
+  return m ? axsVeritixId(m[1]) : "";
 }
 
 // Every component summed: "Base Component" is the face price and the rest are
@@ -4738,8 +4761,16 @@ async function saveAxsVeritixSeats(token, body, tabId, site, eventInfo) {
       if (dollars == null) { missingPrice++; continue; }
 
       const block = String(item.sectionLabel || item.sectionID || "");
-      const row = String(item.rowLabel || "");
+      // A general admission is not a seat, and the payload says so outright.
+      // Every item on a GA event still carries a row and a number, and they
+      // mean nothing: one event returned 1090 of them in a single "General
+      // Admission" section, which would have read as 1090 specific seats on
+      // row 2. Left blank they collapse in the popup into "N available · seats
+      // not numbered", which is the true statement about them.
+      const isGA = item.isGASection === true;
+      const row = isGA ? "" : String(item.rowLabel || "");
       const attrs = [];
+      if (isGA) attrs.push("general admission");
       if (status && status !== "Open") attrs.push(status);
       if (item.seatType && item.seatType !== "STANDARD" && !isResale) {
         attrs.push(String(item.seatType));
@@ -4764,7 +4795,7 @@ async function saveAxsVeritixSeats(token, body, tabId, site, eventInfo) {
       seats[seatKey] = {
         block,
         row,
-        seat: String(item.number == null ? "" : item.number),
+        seat: isGA ? "" : String(item.number == null ? "" : item.number),
         area: String(item.neighborhoodPrintDescription || ""),
         category: isResale ? "resale" : String(offer.category || "standard"),
         tier: VenueTiers.tierFor(venueName, block, row),

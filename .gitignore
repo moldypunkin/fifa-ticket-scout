@@ -5,6 +5,7 @@ node_modules/
 seat_data/
 *.har
 *.log
+fifa-scout-logs-*.txt
 supabase/queries/
 supabase/.temp/
 notes/

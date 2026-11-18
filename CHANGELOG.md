@@ -4,6 +4,38 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## November 18, 2026 — v3.9.1
+
+### AXS: An Event Whose Token Began With A Slash
+
+Reported as AXS general admission showing nothing at all. The dashboard was not mispricing GA or hiding it — the whole event was being dropped before anything was parsed, and the log said so on every payload:
+
+```
+[background] AXS Veritix: no token in
+  https://unifiedapicommerce-us.axs.com/veritix/inventory/v4/yw%2FUNg…/price
+```
+
+The Veritix token is base64 whose slashes arrive percent-encoded, and the id taken from it has always been the leading run of safe characters — because the popup can read that same run off the `tix.axs.com` page url without decoding anything, and the two have to agree or seats are stored under a key the dashboard never looks up.
+
+A token beginning `yw%2FUNg…` has a leading run of **two characters**, short of the twelve needed to be sure this is a token rather than a path word like `price`. So the id came back empty, and with it went the price table, the sections, and all 1,090 general admissions. The event that worked a day earlier did so by luck: its token happens to run 24 safe characters before its first escape.
+
+**When the leading run is too short, the escapes are stripped out and what is left is used instead.** A long token keeps exactly the id it had, so an event captured before this still resolves to the same storage key and nothing is orphaned. `popup.js` carries the same function — it cannot load the service worker — and `axs-veritix-check.js` now compares the two character for character, as well as pinning the token that failed, the one that already worked, lowercase escapes, and that a path word is still rejected.
+
+### AXS: A General Admission Is Not A Seat
+
+With the event parsing again, `offer/search` returns 1,090 items in a single section called "General Admission", every one of them carrying `isGASection: true` — and also a `rowLabel` and a `number`.
+
+Those last two mean nothing on a GA ticket. There is no row 2 seat 202 to go and sit in, and keeping them would have drawn 1,090 specific seats in one section, each looking like somewhere you could choose to sit.
+
+GA items now store a blank row and seat and carry a `general admission` attribute, so the popup collapses them into **"N available · seats not numbered"** — the same treatment Ticketmaster's GA sections got in v3.7.0, and the only true statement available about them. A reserved seat in the same payload keeps its row and seat; the suite pins both sides of that.
+
+### Also
+
+- `fifa-scout-logs-*.txt` is ignored. The popup's Download Logs writes them and they get dropped in the repo to be read; they are diagnostic dumps, not source.
+- 53 suites.
+
+---
+
 ## November 12, 2026 — v3.9.0
 
 ### On Location

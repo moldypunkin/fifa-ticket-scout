@@ -166,6 +166,20 @@ function ticketmasterEventIdFromUrl(url) {
   return null;
 }
 
+// Copied from background.js — the popup cannot load the service worker. The
+// token is base64 with percent-encoded slashes; the leading run of safe
+// characters is the id, except when the first escape lands too early to leave
+// one, and then the escapes are stripped instead. An event whose token begins
+// "yw%2FUNg…" has a two-character run, and before this both sides gave up on
+// it. axs-veritix-check.js fails if this and the worker's copy differ.
+function axsVeritixId(segment) {
+  const raw = String(segment || "");
+  const lead = (raw.split("%")[0] || "").replace(/[^A-Za-z0-9_-]/g, "");
+  if (lead.length >= 12) return lead;
+  const stripped = raw.replace(/%[0-9A-Fa-f]{2}/g, "").replace(/[^A-Za-z0-9_-]/g, "");
+  return stripped.length >= 12 ? stripped : "";
+}
+
 function siteFromUrl(url) {
   try {
     const h = new URL(url).hostname;
@@ -251,8 +265,8 @@ function loadData() {
     // The parser always stores under the onsale token from the offers request,
     // never under `e`. A tix.axs.com url that carries BOTH (the ?c=axs&e=…
     // variant) would otherwise be looked up under `e` and never find its seats.
-    const axsTokenMatch = isAxsSite && url.match(/^https?:\/\/[^/]*tix\.axs\.com\/([A-Za-z0-9_-]{12,})/i);
-    const axsTokenId = axsTokenMatch ? axsTokenMatch[1] : null;
+    const axsTokenMatch = isAxsSite && url.match(/^https?:\/\/[^/]*tix\.axs\.com\/([^/?#]+)/i);
+    const axsTokenId = axsTokenMatch ? axsVeritixId(axsTokenMatch[1]) : null;
 
     // Vivid Seats: a numeric production id, in the path or a query param.
     // Mirrors getVividSeatsEventId() in vividseats-adapter.js; the two must

@@ -171,15 +171,41 @@ const INFO = { name: "The Midland Theatre - Select", date: null, venue: "The Mid
 
 (async () => {
   out("--- the token the dashboard looks up ---");
+  global.axsVeritixId = eval("(" + down(extractFn(bg, "axsVeritixId")) + ")");
+  const idOf = global.axsVeritixId;
   const tokenOf = eval("(" + down(extractFn(bg, "axsVeritixToken")) + ")");
   check("from offer/search", tokenOf(SEARCH_URL) === TOKEN, tokenOf(SEARCH_URL));
   check("from price", tokenOf(PRICE_URL) === TOKEN, tokenOf(PRICE_URL));
   check("v4 and V2 both work", tokenOf(PRICE_URL) === tokenOf(SEARCH_URL));
-  // The popup keys tix.axs.com on the leading run of the url's first segment.
-  const popupToken = ("https://tix.axs.com/" + RAW + "/shop/search")
-    .match(/^https?:\/\/[^/]*tix\.axs\.com\/([A-Za-z0-9_-]{12,})/i)[1];
-  check("and it is what the popup keys on", tokenOf(SEARCH_URL) === popupToken,
-    tokenOf(SEARCH_URL) + " vs " + popupToken);
+  // The popup takes the whole first segment and runs it through the same
+  // function, so the two cannot drift.
+  const popupSegment = ("https://tix.axs.com/" + RAW + "/shop/search")
+    .match(/^https?:\/\/[^/]*tix\.axs\.com\/([^/?#]+)/i)[1];
+  check("and it is what the popup keys on", tokenOf(SEARCH_URL) === idOf(popupSegment),
+    tokenOf(SEARCH_URL) + " vs " + idOf(popupSegment));
+  check("the popup carries the same function, character for character",
+    down(extractFn(bg, "axsVeritixId")).replace(/\s+/g, " ")
+      === down(extractFn(popup, "axsVeritixId")).replace(/\s+/g, " "));
+
+  out("");
+  out("--- a token whose first escape lands early ---");
+  // The bug this fixes. The leading run of "yw%2FUNg…" is two characters, so
+  // the id came back empty and every payload the event carried was dropped
+  // with "no token in …" — the prices, the sections, and all 1090 general
+  // admissions. Seen live on 2026-11-18.
+  const EARLY = "yw%2FUNgAAAACD0vWFAAAAAADB%2Fv%2F%2F%2FwD%2F%2F%2F%2F%2FDEFFRyBQcmVzZW50cwD%2F%2F%2F%2F%2F%2F%2F%2F%2F%2Fw%3D%3D";
+  check("it resolves now", idOf(EARLY).length >= 12, JSON.stringify(idOf(EARLY)));
+  check("and both sides agree on it",
+    idOf(EARLY) === tokenOf("https://x/veritix/inventory/V2/" + EARLY + "/offer/search"));
+  // Backward compatibility: a token with a long enough leading run keeps the
+  // id it already had, so an event captured before this still resolves.
+  check("a long leading run is untouched",
+    idOf("nZA9NwAAAACjRE1GAwAAAAB6%2Fv%2F%2F") === "nZA9NwAAAACjRE1GAwAAAAB6",
+    idOf("nZA9NwAAAACjRE1GAwAAAAB6%2Fv%2F%2F"));
+  check("lowercase escapes read the same",
+    idOf("nZA9NwAAAACjRE1GAwAAAAB6%2fv%2f") === idOf("nZA9NwAAAACjRE1GAwAAAAB6%2Fv%2F"));
+  // A path word must still be rejected, or "price" becomes an event.
+  check("a path word is still not a token", idOf("price") === "" && idOf("") === "");
   check("a short path yields nothing", tokenOf("https://x/veritix/inventory/V2/ab/offer/search") === "");
 
   out("");
@@ -373,6 +399,57 @@ const INFO = { name: "The Midland Theatre - Select", date: null, venue: "The Mid
   check("an event with no levels is reported",
     logs.some((l) => /this event prices its offers directly instead/.test(l)),
     logs.filter((l) => /price level\(s\)/.test(l)).pop());
+
+  out("");
+  out("--- a general admission event ---");
+  // Read off a live GA onsale (The Truman, 2026-11-18): offer/search returned
+  // 1090 items in ONE section called "General Admission", every one of them
+  // carrying isGASection true, a rowLabel and a number. Those last two are
+  // meaningless on a GA ticket — there is no row 2 seat 202 to go and sit in
+  // — and keeping them would have drawn 1090 specific seats.
+  const GA_TOKEN = "ywUNgAAAACD0vWFAAAAAADBvwDDEFFRyBQcmVzZW50cwDw";
+  const GA = {
+    offers: [
+      { category: "standard", offerID: "45517907", items: [
+        item(2, "General Admission", 2, "2", "202", 6591, "Open", { isGASection: true }),
+        item(2, "General Admission", 2, "2", "203", 6591, "Open", { isGASection: true }),
+        // A reserved seat in the same payload, to prove only GA is blanked.
+        item(9, "402", 80, "C", "14", 6593, "Open"),
+      ] },
+    ],
+  };
+  // The levels have to be indexed under this token too, or every item is
+  // dropped for having no price and the assertions below pass on an empty
+  // list — which is exactly what the bug looked like in the first place.
+  await ctx.axsIndexVeritixPrices(GA_TOKEN, PRICE);
+  await ctx.saveAxsVeritixSeats(GA_TOKEN, GA, 4, "axs", INFO);
+  const gaGame = stored["axs:" + GA_TOKEN] || {};
+  const gaSeats = Object.values(gaGame.seats || {});
+  const ga = gaSeats.filter((x) => x.block === "General Admission");
+  const reserved = gaSeats.filter((x) => x.block === "402");
+
+  check("the GA admissions are stored", ga.length === 2, String(ga.length));
+  // Blank on both counts, which is what makes the popup collapse them into
+  // "N available · seats not numbered" rather than listing them one by one.
+  check("no seat number is kept", ga.every((x) => x.seat === ""),
+    ga.map((x) => JSON.stringify(x.seat)).join(","));
+  check("and no row", ga.every((x) => x.row === ""),
+    ga.map((x) => JSON.stringify(x.row)).join(","));
+  check("they say what they are",
+    ga.every((x) => x.attributes.indexOf("general admission") !== -1),
+    ga.map((x) => x.attributes.join("|")).join(" / "));
+  check("they still carry a price", ga.every((x) => x.price > 0));
+  // Each admission is its own item with its own number, so they must land
+  // under distinct keys rather than collapsing into one and losing the count.
+  // The number is still part of the key even though it is not shown.
+  check("one record per admission", Object.keys(gaGame.seats).length === 3,
+    Object.keys(gaGame.seats).length + " key(s)");
+
+  check("a reserved seat in the same payload keeps its row",
+    reserved.length === 1 && reserved[0].row === "C" && reserved[0].seat === "14",
+    reserved.length ? reserved[0].row + "/" + reserved[0].seat : "missing");
+  check("and is not labelled general admission",
+    reserved.length === 1 && reserved[0].attributes.indexOf("general admission") === -1);
 
   out("");
   out("--- wiring ---");
