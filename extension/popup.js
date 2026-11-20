@@ -193,6 +193,7 @@ function siteFromUrl(url) {
     if (h.includes("gotickets")) return "gotickets";
     if (h.includes("ticketsforless")) return "ticketsforless";
     if (h.includes("rutheckerdhall")) return "rutheckerd";
+    if (h.includes("kcstarlight")) return "starlight";
     if (h.includes("onlocationexp")) return "onlocation";
     if (h.includes("axs")) return "axs";
     if (h.includes("-shop-")) return "lms";
@@ -337,6 +338,22 @@ function loadData() {
     const olEventId = olEventMatch ? olEventMatch[1] : null;
     const isOnLocationEvent = !!olEventId;
 
+    // Starlight Theatre: a production slug then the performance number,
+    // "/gruffalo/5426". Mirrors getStarlightEventId() in
+    // starlight-adapter.js; the two must stay in step or the adapter captures
+    // a page the popup cannot show. The id is taken from the PATH, which keeps
+    // the digit-laden queueittoken out of the key by construction.
+    const isStarlightSite = /kcstarlight\.com/.test(url);
+    let starEventId = null;
+    if (isStarlightSite) {
+      try {
+        const segs = new URL(url).pathname.replace(/\/+$/, "").split("/")
+          .filter((s) => /^\d{2,}$/.test(s));
+        starEventId = segs.length ? segs[segs.length - 1] : null;
+      } catch (e) { starEventId = null; }
+    }
+    const isStarlightEvent = !!starEventId;
+
     const isVividSeatsSite = /vividseats\.com/.test(url);
     const vsEventMatch = isVividSeatsSite && (url.match(/\/production[s]?\/(\d+)/i)
       || url.match(/[?&]productionId=(\d+)/i)
@@ -363,6 +380,7 @@ function loadData() {
         : isTicketsForLessEvent ? "ticketsforless"
         : isRuthEckerdEvent ? "rutheckerd"
         : isOnLocationEvent ? "onlocation"
+        : isStarlightEvent ? "starlight"
         : null,
       // No site is in bring-up right now. A site belongs here rather than in
       // `passive` while it is recognised but has no parser, so the empty state
@@ -426,6 +444,9 @@ function loadData() {
       } else if (gotEventId) {
         const gotKey = `gotickets:${gotEventId}`;
         if (games[gotKey]) activeKey = gotKey;
+      } else if (starEventId) {
+        const starKey = `starlight:${starEventId}`;
+        if (games[starKey]) activeKey = starKey;
       } else if (olEventId) {
         const olKey = `onlocation:${olEventId}`;
         if (games[olKey]) activeKey = olKey;
@@ -1052,7 +1073,7 @@ let currentSite = "resale";
 // again changes this one line.
 const CONFIG_REPO = "https://raw.githubusercontent.com/moldypunkin/fifa-ticket-scout/main";
 
-const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", tickpick: "TickPick", axs: "AXS", vividseats: "Vivid Seats", gametime: "Gametime", gotickets: "GoTickets", ticketsforless: "TicketsForLess", rutheckerd: "Ruth Eckerd Hall", onlocation: "On Location", resale: "Resale" };
+const SITE_LABELS = { lms: "LMS", ticketmaster: "Ticketmaster", seatgeek: "SeatGeek", stubhub: "StubHub", evenue: "Evenue", tickpick: "TickPick", axs: "AXS", vividseats: "Vivid Seats", gametime: "Gametime", gotickets: "GoTickets", ticketsforless: "TicketsForLess", rutheckerd: "Ruth Eckerd Hall", onlocation: "On Location", starlight: "Starlight Theatre", resale: "Resale" };
 
 // The header follows the active site. `lms` and `resale` are both FIFA
 // properties, so they keep the original name.
@@ -1074,6 +1095,7 @@ const SITE_FILE_TAGS = {
   gotickets: "gotickets",
   ticketsforless: "ticketsforless",
   rutheckerd: "ruth-eckerd-hall",
+  starlight: "starlight-theatre",
   onlocation: "onlocation",
 };
 
@@ -1105,6 +1127,7 @@ const PASSIVE_SITE_LABELS = {
   ticketsforless: "TicketsForLess",
   rutheckerd: "Ruth Eckerd Hall",
   onlocation: "On Location",
+  starlight: "Starlight Theatre",
 };
 
 const SITE_BRANDS = {
@@ -1121,6 +1144,7 @@ const SITE_BRANDS = {
   gotickets: "GoTickets Scout",
   ticketsforless: "TicketsForLess Scout",
   rutheckerd: "Ruth Eckerd Hall Scout",
+  starlight: "Starlight Theatre Scout",
 };
 
 function setBrand(site) {
@@ -2098,7 +2122,7 @@ function compareVersions(a, b) {
 // tickpick stores `p`, the per-ticket price the listing quotes. TickPick
 // advertises all-in pricing so 1.0 is expected to be right, but that has not
 // been checked against a checkout page.
-const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0, gotickets: 1.0, ticketsforless: 1.0, rutheckerd: 1.0, onlocation: 1.0 };
+const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0, gotickets: 1.0, ticketsforless: 1.0, rutheckerd: 1.0, onlocation: 1.0, starlight: 1.0 };
 
 // Flat per-ticket fee, added after the multiplier. Percentage fees alone could
 // not describe Evenue: its price-level table quotes a base price and the site

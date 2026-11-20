@@ -42,6 +42,11 @@
   // below is armed for it, and the listings are known to load on an
   // interaction rather than on page load.
   const isOnLocation = window.location.hostname.includes('onlocationexp.com');
+  // Starlight Theatre. Tessitura, like Ruth Eckerd — identified from the
+  // Queue-it redirect, whose `man` parameter reads "Send to TNEW Live Safety
+  // Net Queue". TNEW is Tessitura Network Express Web, and its seat picker is
+  // the same SYOS the parser already reads.
+  const isStarlight = window.location.hostname.includes('kcstarlight.com');
 
   if (isTicketmaster) {
     console.log("[FIFA Ticket Scout] Running on Ticketmaster (will use adapter) build " + BUILD_STAMP);
@@ -69,6 +74,8 @@
     console.log("[FIFA Ticket Scout] Running on Ruth Eckerd Hall (passive capture) build " + BUILD_STAMP);
   } else if (isOnLocation) {
     console.log("[FIFA Ticket Scout] Running on On Location (endpoint discovery mode) build " + BUILD_STAMP);
+  } else if (isStarlight) {
+    console.log("[FIFA Ticket Scout] Running on Starlight Theatre (passive capture) build " + BUILD_STAMP);
   } else {
     console.log("[FIFA Ticket Scout] Unknown ticketing site - no action");
     return;
@@ -105,7 +112,7 @@
           ? ["/pac-api/"]
           : isTickPick
             ? ["/listings/internal/event-v2/"]
-            : isRuthEckerd
+            : isRuthEckerd || isStarlight
               // Confirmed on performance 33816: Tessitura SYOS serves the seats
               // from /api/syos/GetSeatList (311KB, 728 seats for one screen)
               // and the price zones from /api/syos/GetInitData. Matched on the
@@ -237,7 +244,7 @@
   // through console.log so content.js relays them into Download Logs.
   const SITE_TAG = isStubHub ? "SH" : isSeatGeek ? "SG" : isEvenue ? "EV"
     : isTickPick ? "TP" : isAxs ? "AXS" : isTicketmaster ? "TM"
-    : isRuthEckerd ? "REH" : "FIFA";
+    : isRuthEckerd ? "REH" : isStarlight ? "STAR" : "FIFA";
   const capStats = { seen: 0, matched: 0, parsed: 0, notJson: 0, posted: 0 };
   let capSummaryTimer = null;
 
@@ -435,7 +442,7 @@
   // responses on the passive-capture sites, so the cost disappears the moment
   // capture works.
   const isPassiveSite = isStubHub || isSeatGeek || isEvenue || isTickPick || isAxs
-    || isRuthEckerd || isOnLocation;
+    || isRuthEckerd || isOnLocation || isStarlight;
 
   // Sites where the inventory endpoint is still unknown. Candidate recording
   // normally stops as soon as MATCH_PATTERNS hits something, which is right
@@ -1106,6 +1113,7 @@
         : isGoTickets ? window.__goticketsAdapter
         : isTicketsForLess ? window.__ticketsforlessAdapter
         : isRuthEckerd ? window.__rutheckerdAdapter
+        : isStarlight ? window.__starlightAdapter
         : isOnLocation ? window.__onlocationAdapter
         : isVividSeats ? window.__vividseatsAdapter
         : null;

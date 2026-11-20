@@ -4,6 +4,45 @@ All notable changes to FIFA Ticket Scout are documented here. Timestamps are in 
 
 ---
 
+## November 20, 2026 — v3.10.0
+
+### Starlight Theatre
+
+The fourteenth source, and the first that needed no capture round at all to identify.
+
+The event url answers **302 to a Queue-it waiting room**, and the queue's own parameters name what is behind it:
+
+```
+https://kcstarlight.queue-it.net/?c=kcstarlight&e=safetynetlive
+  &man=Send%20to%20TNEW%20Live%20Safety%20Net%20Queue
+```
+
+TNEW is Tessitura Network Express Web, and its seat picker is SYOS — `/api/syos/GetInitData` and `/api/syos/GetSeatList`, already parsed here for Ruth Eckerd Hall. So this release adds a venue, not a parser: an adapter, a hostname, labels, a file tag and the popup lookup.
+
+**The url shape:** `tickets.kcstarlight.com/gruffalo/5426` — a production slug then the performance number, where Ruth Eckerd's is two numbers. The id is taken from the PATH, which keeps `queueittoken` out of the storage key by construction: it is a Queue-it session token, it carries a ten-digit timestamp, it changes on every visit, and in the key it would scatter one event across a new entry per visit.
+
+**Whether 5426 is the number SYOS uses could not be proved from the url**, and getting it wrong presents as capturing nothing with no error anywhere — which is how Ruth Eckerd behaved when it was first keyed on the wrong half of its url. So the worker names the key it stored under, once per event:
+
+```
+[background] SYOS: storing under starlight:5426 — the page url must end in 5426
+  or the dashboard will not find these seats
+```
+
+Confirmed live on The Gruffalo (performance 5426): the seats arrive and the dashboard shows them, which it could only do if the two agree.
+
+### One Parser, Two Venues
+
+`saveSyosSeats` had Ruth Eckerd baked into it in two places, which was harmless while it was the only Tessitura venue and would have been wrong the moment it was not:
+
+- `site: "rutheckerd"` on every stored seat — Starlight's seats would have carried the wrong site, and with it the wrong brand, the wrong fee table and the wrong Type column in the export.
+- `"Ruth Eckerd Hall"` as the venue fallback when the page's own DOM read comes back empty. This one matters most: the venue name is the key `VenueTiers.tierFor()` looks a seating map up under, so every Starlight seat would have been tiered against Ruth Eckerd's map — wrongly, and without erroring.
+
+Both now come from the payload and a per-site table, and the dispatch gate is a site set rather than one name. `rutheckerd-check` gained an assertion that no fixed site is left in the parser, so the next Tessitura venue cannot reintroduce it.
+
+`tests/starlight-check.js` pins the id rule (including that the queue token never reaches it), that the popup and the adapter derive the same id, and the whole venue layer. 54 suites.
+
+---
+
 ## November 18, 2026 — v3.9.2
 
 ### AXS: 1,090 General Admissions Stored As One Seat

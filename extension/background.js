@@ -151,6 +151,7 @@ function siteFromUrl(url) {
     if (h.includes("gotickets")) return "gotickets";
     if (h.includes("ticketsforless")) return "ticketsforless";
     if (h.includes("rutheckerdhall")) return "rutheckerd";
+    if (h.includes("kcstarlight")) return "starlight";
     if (h.includes("onlocationexp")) return "onlocation";
     if (h.includes("axs")) return "axs";
     if (h.includes("-resale-")) return "resale";
@@ -576,7 +577,7 @@ function mergeSeats(prev, seats, tabId, gameKey) {
 // Copies of popup.js's fee tables, file tags, price maths and TM event-id
 // parser: the service worker cannot load popup.js. tests/auto-pull-check.js
 // fails if any copy differs from the popup's, so edit both together.
-const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0, gotickets: 1.0, ticketsforless: 1.0, rutheckerd: 1.0, onlocation: 1.0 };
+const FEE_MULTIPLIER_BY_SITE = { resale: 1.15, lms: 1.0, ticketmaster: 1.0, seatgeek: 1.0, stubhub: 1.0, evenue: 1.0, tickpick: 1.0, axs: 1.0, vividseats: 1.0, gametime: 1.0, gotickets: 1.0, ticketsforless: 1.0, rutheckerd: 1.0, onlocation: 1.0, starlight: 1.0 };
 const FEE_FLAT_BY_SITE = { resale: 0, lms: 0, ticketmaster: 0, seatgeek: 0, stubhub: 0, evenue: 5.00, tickpick: 0, axs: 0 };
 const SITE_FILE_TAGS = {
   resale: "fifa-resale",
@@ -592,6 +593,7 @@ const SITE_FILE_TAGS = {
   gotickets: "gotickets",
   ticketsforless: "ticketsforless",
   rutheckerd: "ruth-eckerd-hall",
+  starlight: "starlight-theatre",
   onlocation: "onlocation",
 };
 
@@ -1137,7 +1139,7 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
     }
   }
 
-  // Ruth Eckerd Hall - Tessitura SYOS. Two payloads, both captured passively:
+  // Tessitura SYOS. Two payloads, both captured passively:
   //
   //   /api/syos/GetInitData?performanceId=<id>   price zones, fees, screen list
   //   /api/syos/GetSeatList?...&screenId=<n>     the seats for ONE screen
@@ -1146,13 +1148,25 @@ async function processApiResponse(url, body, tabId, eventInfo, amEventId) {
   // opens. Each capture merges into the same event, so opening every screen
   // builds the full picture, and the summary says how many screens are still
   // unseen rather than letting a partial capture look complete.
-  if (site === "rutheckerd" && url.includes("/api/syos/") && body) {
+  // One venue per site key, but one parser: the payloads are Tessitura's, not
+  // the venue's, and nothing in saveSyosSeats is venue-specific any more.
+  if (SYOS_SITES[site] && url.includes("/api/syos/") && body) {
     const eventId = syosPerformanceId(url, body);
     if (!eventId) {
       bgLog("[background] SYOS: no performanceId in " + url.split("?")[0]);
     } else if (url.includes("GetInitData")) {
       syosIndexInit(eventId, body);
     } else if (Array.isArray(body.seats)) {
+      // Said out loud because the popup looks the event up by the number in
+      // the address bar, while seats are stored under the one SYOS reports.
+      // When those differ the dashboard shows nothing and nothing errors —
+      // which is how Ruth Eckerd behaved when it was keyed on the wrong half
+      // of its url.
+      if (!syosKeyLogged[`${site}:${eventId}`]) {
+        syosKeyLogged[`${site}:${eventId}`] = true;
+        bgLog(`[background] SYOS: storing under ${site}:${eventId} — the page url ` +
+          `must end in ${eventId} or the dashboard will not find these seats`);
+      }
       await enforceGameLimit(`${site}:${eventId}`);
       await saveSyosSeats(eventId, body, tabId, site, eventInfo, url);
     }
@@ -3177,6 +3191,20 @@ async function saveEvenueSeats(eventId, body, tabId, site, eventInfo, url) {
   await chrome.storage.local.set({ games });
 }
 
+// --- Tessitura SYOS ------------------------------------------------------
+// Which sites run it, and the venue name to fall back on when the page's own
+// DOM read comes back empty. The venue matters beyond display: it is the key
+// VenueTiers.tierFor() looks a seating map up under, so the wrong one here
+// tiers every seat wrongly and silently.
+const SYOS_SITES = { rutheckerd: 1, starlight: 1 };
+// Logged once per event rather than once per screen — the page fetches a
+// screen at a time and would otherwise repeat the line all day.
+const syosKeyLogged = {};
+const SYOS_VENUE_NAMES = {
+  rutheckerd: "Ruth Eckerd Hall",
+  starlight: "Starlight Theatre",
+};
+
 // --- Ruth Eckerd Hall / Tessitura SYOS -----------------------------------
 // Confirmed on performance 33816 (secure.rutheckerdhall.com/33733/33816):
 // GetSeatList returned 728 seats for screen 7 alone.
@@ -3269,7 +3297,7 @@ async function saveSyosSeats(eventId, body, tabId, site, eventInfo, url) {
     games[gameKey].match = {
       name: eventInfo.name,
       date: eventInfo.date || prev.date || null,
-      venue: eventInfo.venue || prev.venue || "Ruth Eckerd Hall",
+      venue: eventInfo.venue || prev.venue || SYOS_VENUE_NAMES[site] || null,
       currency: "USD",
       performanceId: eventId,
     };
@@ -3326,7 +3354,11 @@ async function saveSyosSeats(eventId, body, tabId, site, eventInfo, url) {
       tier: VenueTiers.tierFor(venueName, block, row),
       price: Math.round(dollars * 1000),
       exclusive: true,
-      site: "rutheckerd",
+      // The site this payload came from, not a fixed one: the parser is
+      // shared across every Tessitura venue, and a hardcoded value here would
+      // file Starlight's seats as Ruth Eckerd's — wrong brand, wrong fee
+      // table, wrong Type column in the export.
+      site,
       accessible: false,
       attributes: [],
     };

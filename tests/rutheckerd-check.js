@@ -111,7 +111,16 @@ check("probe not armed for Ruth Eckerd", !/DISCOVERY_SITE = isRuthEckerd/.test(i
 check("the site chain has a branch", /\} else if \(isRuthEckerd\) \{/.test(inj));
 check("event info wired", /isRuthEckerd \? window\.__rutheckerdAdapter/.test(inj));
 check("its logs reach Download logs", /"\[REH\]", "\[REH-PROBE\]"/.test(inj));
-check("the dispatch requires the syos path", /site === "rutheckerd" && url\.includes\("\/api\/syos\/"\)/.test(bg));
+// The gate is a site SET now that a second Tessitura venue shares the
+// parser, but it must still require the syos path rather than matching
+// every request the site makes.
+check("the dispatch requires the syos path",
+  /SYOS_SITES\[site\] && url\.includes\("\/api\/syos\/"\)/.test(bg));
+check("and Ruth Eckerd is still in that set", /SYOS_SITES = \{[^}]*rutheckerd: 1/.test(bg));
+// The parser is shared, so nothing in it may be hardcoded to one venue:
+// a fixed site would file another venue's seats under this one.
+check("the stored site comes from the payload, not a constant",
+  !/site: "rutheckerd",/.test(bg));
 
 out("");
 out("--- prices: the zone, not the seat ---");

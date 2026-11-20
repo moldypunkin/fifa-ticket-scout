@@ -44,6 +44,7 @@ passed while the extension misbehaved.
 | `tm-facets-pagination-check` | following ISMDS page links, and keeping what was fetched when a page fails |
 | `section-filter-check` | the section filter box: matching rules, and that it runs before every renderer |
 | `axs-veritix-check` | the AXS Veritix inventory: the token both sides key on, per-offer pricing so a premium seat is not priced as standard, and that the seat picker's heading is never stored as the event name |
+| `starlight-check` | Starlight Theatre, the second Tessitura venue: that the performance id comes from the path and never picks up the Queue-it token, that the popup and the adapter derive the same one, and that the shared SYOS parser no longer has Ruth Eckerd's site or venue baked into it |
 | `rutheckerd-check` / `rutheckerd-e2e-check` | Tessitura SYOS: zone pricing with the per-seat fee, availability read from the words not the codes, and that the parser and the popup agree on the storage key exactly |
 | `deal-score-check` | the Best Value ranking: the peer ladder, median baselines, group and row edges, and the caveats shown rather than subtracted |
 | `probe-format-check` | discovery probe output format and log-relay tagging |

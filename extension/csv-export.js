@@ -23,9 +23,9 @@
   //   onlocation          TicketNetwork inventory behind an official hospitality seller, so it
     //                       sells both: Category "resale" (from tgCType "R") is resale, any other
     //                       class is treated as the seller's own
-    //   lms, evenue, rutheckerd   FIFA Last Minute Sales and venue box offices: primary
+    //   lms, evenue, rutheckerd, starlight   FIFA Last Minute Sales and venue box offices: primary
   //   resale (FIFA resale) and the marketplaces: resale
-  const PRIMARY_SITES = { lms: 1, evenue: 1, rutheckerd: 1 };
+  const PRIMARY_SITES = { lms: 1, evenue: 1, rutheckerd: 1, starlight: 1 };
   const MIXED_SITES = { ticketmaster: 1, axs: 1, onlocation: 1 };
   const RESALE_SITES = { resale: 1, stubhub: 1, tickpick: 1, vividseats: 1, gametime: 1, gotickets: 1, ticketsforless: 1 };
   const SG_RESALE = { exchange: 1, marketplace: 1, fan_to_fan: 1 };
